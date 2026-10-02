@@ -2,6 +2,7 @@
 data/
 PLAN.md
 CONTRACT.md
+docs/review-findings*.md
 *.sav
 *.xlsx
 *.xls
@@ -29,3 +30,4 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+.memory/

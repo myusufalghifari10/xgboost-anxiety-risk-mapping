@@ -10,11 +10,26 @@ DATA_RAW = ROOT / "data" / "raw" / "INPUT DATA  (1).sav"
 DATA_CLEAN = ROOT / "outputs" / "data_clean.parquet"
 FEATURES = ROOT / "outputs" / "features.parquet"
 MODEL_PATH = ROOT / "outputs" / "model_final.ubj"
+MODEL_CLF_PATH = ROOT / "outputs" / "model_final_clf.ubj"
+PREPROCESSOR_PATH = ROOT / "outputs" / "preprocessor.joblib"
+OOF_CSV = ROOT / "outputs" / "oof_predictions.csv"
+PER_FOLD_TUNING_CSV = ROOT / "outputs" / "per_fold_tuning.csv"
+BEST_PARAMS_JSON = ROOT / "outputs" / "best_params.json"
 TRIALS_CSV = ROOT / "outputs" / "optuna_trials.csv"
 METRICS_JSON = ROOT / "outputs" / "metrics.json"
 FIG_DIR = ROOT / "outputs" / "figures"
 TABLE_DIR = ROOT / "outputs" / "tables"
 CODEBOOK = ROOT / "docs" / "codebook.md"
+
+# Artefak penjelasan & laporan (konstantas path — jangan hardcode di 05/06)
+SHAP_GLOBAL_RANKING = ROOT / "outputs" / "shap_global_ranking.csv"
+SHAP_LOCAL = ROOT / "outputs" / "shap_local.csv"
+INTERACTION_SUMMARY = ROOT / "outputs" / "interaction_summary.json"
+DROP_HB_JSON = ROOT / "outputs" / "drop_hb_test.json"
+STABILITY_RANKING = ROOT / "outputs" / "stability_ranking.csv"
+REPORT_RINGKAS = TABLE_DIR / "report_ringkas.md"
+TABEL_PERFORMA = TABLE_DIR / "tabel_performa.csv"
+TABEL_FAKTOR = TABLE_DIR / "tabel_faktor.csv"
 
 # ---------- Reproducibility ----------
 RANDOM_SEED = 42
@@ -119,7 +134,12 @@ OUTER_REPEATS = 10
 INNER_FOLDS = 5
 
 # ---------- Tuning (PLAN §6) ----------
-N_TRIALS = 5000
+# KEPUTUSAN ORCHESTRATOR: nested CV punya 50 ronde tuning (5 fold x 10 ulangan).
+# 5000 trial x 50 ronde x 5 inner fold = ~1,25 juta fit XGBoost (berhari-hari) ->
+# 500 trial/ronde untuk evaluasi nested CV (CLI --n-trials bisa dinaikkan),
+# dan 5000 trial penuh untuk model FINAL di seluruh 306 siswa.
+N_TRIALS_PER_OUTER_FOLD = 500
+N_TRIALS_FINAL = 5000
 XGB_SEARCH_SPACE = {
     "n_estimators": ("int", 100, 2000),
     "max_depth": ("int", 2, 10),
@@ -137,3 +157,9 @@ ONE_SE_RULE = True  # pilih model lebih sederhana bila skor dalam 1 SE dari yang
 PRIMARY_METRIC = "rmse"   # fungsi latih/tuning (kontinu)
 REPORT_METRICS = ["rmse", "mae", "r2"]           # kontinu
 REPORT_METRICS_BIN = ["auc", "balanced_accuracy", "brier"]  # biner
+
+# ---------- Zona risiko & ambang kelompok (PLAN §10, permintaan rev-explain N7/N9) ----------
+ZONE_HIJAU_MAX = 1.5    # skor prediksi < 1,5 -> hijau
+ZONE_KUNING_MAX = 2.5   # = ANXIETY_HIGH_THRESHOLD; >= -> merah
+GROUP_RISK_HIGH = 0.5   # proporsi anggota zona merah -> kelompok TINGGI
+GROUP_RISK_MODERATE = 0.25
