@@ -43,12 +43,15 @@ Dihasilkan otomatis oleh `src/02_features.py`. Sumber data: 306 siswa SMK, Kec. 
 | Item terbalik (SOSIAL3) | Reverse-score: nilai_baru = 6 − nilai |
 | `VAR00001` | Kolom kosong → dibuang |
 
+- **Audit arah item (hasil verifikasi).** `REVERSE_ITEMS=[SOSIAL3]` sudah lengkap: semua item bernegasi lain (KECEMASANSTRESS2/9/16/17/22, MASADEPAN3, COPING16–18) sengaja TIDAK di-reverse karena tetap searah konstruk/subskalanya (COPING16–18 = subskala `coping_negatif`, skor tinggi = makin negatif).
+- **Sensitivitas item 12 (nilai 5).** Nilai invalid diisi median kolom (=2); alternatif isi 4 teruji TIDAK mengubah label `y_biner` siswa mana pun.
+
 ## Asumsi yang Perlu Dikonfirmasi Dosen
 
-- **Label status orang tua.** Kategori 1 berlabel *"kedua orang tua meninggal dunia"* tapi 226 dari 240 siswa kategori tersebut tinggal bersama ayah dan ibu → label kemungkinan salah ketik. Asumsi kerja: kategori 1 = **keluarga utuh**. Kategori 2 (9 siswa, pola mencampur) dan kategori 5 (4 siswa, tanpa label) digabung ke **lainnya**. Sisa kategori 3 & 4 dipakai sesuai label aslinya. Tersedia 3 versi coding di `config.ORANGTUA_RECODE_VARIANTS` untuk sensitivity analysis.
-- **Ambang `y_biner`.** 2,5 dipilih agar "sering ke atas" masuk kategori cemas tinggi; ambang alternatif 2,0 dan 2,3 menghasilkan 42,2% dan 25,8% positif — dipakai sebagai bahan diskusi bila dosen ingin prevalensi lebih tinggi.
+- **Label status orang tua.** Kategori 1 berlabel *"kedua orang tua meninggal dunia"* tapi 226 dari 240 siswa kategori tersebut tinggal bersama ayah dan ibu → label kemungkinan salah ketik. Asumsi kerja: kategori 1 = **keluarga utuh**. Kategori 2 (9 siswa, pola mencampur) dan kategori 5 (4 siswa, tanpa label) digabung ke **lainnya**. Sisa kategori 3 & 4 dipakai sesuai label aslinya. 3 versi coding di `config.ORANGTUA_RECODE_VARIANTS` disiapkan untuk sensitivity analysis, namun BELUM dijalankan (fase robustness terpisah).
+- **Ambang `y_biner`.** 2,5 dipilih sebagai titik tengah antara pilihan "kadang-kadang" (2) dan "sering" (3) — siswa dengan rata-rata skor di atasnya masuk kategori cemas tinggi; ambang alternatif 2,0 dan 2,3 menghasilkan 42,2% dan 25,8% positif — dipakai sebagai bahan diskusi bila dosen ingin prevalensi lebih tinggi.
 - **Temuan penting — `f_sosial` berbeda dari analisis sebelumnya.** Rata-rata blok sosial TANPA reverse-scoring adalah **2,15** (angka yang dipakai di analisis deskriptif & regresi lama), sedangkan pipeline kita memakai mean **2,74** setelah `SOSIAL3` di-reverse. Item itu berbunyi *"Saya merasa TIDAK tertekan ketika mengalami masalah…"* — arahnya berlawanan, sehingga skor sebelumnya sempat menyamakan "sering tidak tertekan" dengan "tinggi tekanan sosial". Karena faktor sosial menjadi prediktor terkuat di regresi lama (β=0,241), temuan itu perlu dihitung ulang. Pipeline ini sengaja mengikuti aturan `config.REVERSE_ITEMS` (reverse = benar).
-- **Baris duplikat.** Dua baris identik di seluruh kolom tidak dihapus (N tetap 306) agar selaras dengan analisis deskriptif sebelumnya; ditandai di `outputs/qa_report.md`.
+- **Baris duplikat.** Dua baris identik di seluruh kolom tidak dihapus (N tetap 306) agar selaras dengan analisis deskriptif sebelumnya; ditandai di `outputs/qa_report.md`. Implikasi evaluasi: pasangan kembar bisa terbagi ke train dan test (bias optimis <0,5%).
 
 ## Pemakaian Etis
 

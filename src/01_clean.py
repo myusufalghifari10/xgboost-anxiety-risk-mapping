@@ -55,6 +55,7 @@ def _fix_out_of_range(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
     """
     df = df.copy()
     fixed: dict[str, int] = {}
+    missing_sebelum: dict[str, int] = {}
     lo, hi = C.ANXIETY_VALID_RANGE
     for col in C.ANXIETY_OUT_OF_RANGE:
         if col not in df.columns:
@@ -62,6 +63,9 @@ def _fix_out_of_range(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
         bad = ~df[col].between(lo, hi) & df[col].notna()
         n_bad = int(bad.sum())
         if n_bad:
+            # Fix C2: hitung missing SEBELUM masking supaya jumlah yang terimputasi
+            # median bisa dibedakan dari jumlah nilai invalid yang dibetulkan.
+            missing_sebelum[col] = int(df[col].isna().sum())
             df.loc[bad, col] = np.nan
             median = df[col].median()
             if pd.isna(median):
@@ -71,6 +75,7 @@ def _fix_out_of_range(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
     qa["perbaikan_rentang"] = {
         "rentang_valid": f"{lo}-{hi}",
         "kolom_diperbaiki": fixed,
+        "nilai_missing_sebelum_imputasi": missing_sebelum,
         "total_kasus": sum(fixed.values()),
     }
     return df
@@ -91,8 +96,17 @@ def _merge_split_anxiety_items(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
         for col in (keep, partner):
             if col not in df.columns:
                 _fail(f"kolom item terbelah tidak ada: {col}")
+        # Fix C2: bukti angka untuk klaim "kolom pasangan (14/20) semua nol" di QA.
+        nol = {keep: int((df[keep] == 0).sum()), partner: int((df[partner] == 0).sum())}
         valid = df[[keep, partner]].apply(lambda r: [v for v in r if lo <= v <= hi], axis=1)
         both = int((valid.map(len) == 2).sum())
+        # Fix C2: bila KEDUA kolom pasangan terisi valid, merge otomatis tidak aman
+        # (nilai non-integer, dua jawaban diramu senyap) -> fail-fast, bukan lewat.
+        if both:
+            _fail(
+                f"kedua kolom pasangan {keep}+{partner} terisi valid pada {both} baris; "
+                "merge otomatis tidak bisa dipakai — periksa data mentah"
+            )
         one = int((valid.map(len) == 1).sum())
         none = int((valid.map(len) == 0).sum())
         df[keep] = valid.map(lambda vs: float(np.mean(vs)) if vs else np.nan)
@@ -106,6 +120,7 @@ def _merge_split_anxiety_items(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
             "kedua_nilai_valid": both,
             "satu_nilai_valid_fallback": one,
             "tanpa_nilai_valid_diimputasi": none,
+            "nilai_nol_di_kolom": nol,
         }
     qa["item_terbelah"] = {
         "pasangan": merged,
@@ -174,11 +189,23 @@ def _recode_demographics(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
             _fail(f"kolom {col_str} punya {n_missing} missing value — astype(str) akan membuat kategori 'nan' palsu")
 
     df["d_jenis_kelamin"] = df["JK"].astype(str)
+    # Fix C2: guard domain nilai sebelum astype(int) — NaN lolos guard lama
+    # (yang memakai dropna) dan astype(int) memotong pecahan secara senyap.
+    for col_int in ("Umur", "TINGGAL", "ORANGTUA"):
+        n_missing = int(df[col_int].isna().sum())
+        if n_missing:
+            _fail(f"kolom {col_int} punya {n_missing} missing value — astype(int) akan gagal atau merusak kode")
+    if not (df["Umur"] % 1 == 0).all():
+        _fail("kolom Umur punya nilai pecahan — astype(int) akan memotong diam-diam")
+    kode_jk = set(df["JK"].dropna().unique())
+    if not kode_jk <= {"L", "P"}:
+        _fail(f"kode JK di luar daftar L/P: {sorted(kode_jk)}")
     df["d_umur"] = df["Umur"].astype(int)
     df["d_jurusan"] = df["Jurusan"].astype(str)
     df["d_tinggal_grup"] = df["TINGGAL"].astype(int).map(C.TINGGAL_RECODE).astype(int)
     df["d_status_ortu"] = df["ORANGTUA"].astype(int).map(C.ORANGTUA_RECODE).astype(int)
 
+    ct = pd.crosstab(df["TINGGAL"], df["ORANGTUA"])
     qa["recode_demografi"] = {
         "tinggal_grup": {C.TINGGAL_LABELS[k]: int(v) for k, v in
                          df["d_tinggal_grup"].value_counts().sort_index().items()},
@@ -186,6 +213,14 @@ def _recode_demographics(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
                         df["d_status_ortu"].value_counts().sort_index().items()},
         "distribusi_jenis_kelamin": {k: int(v) for k, v in
                                      df["d_jenis_kelamin"].value_counts().items()},
+        # Fix C2: audibilitas recode — distribusi kode mentah TINGGAL dan tab silang
+        # TINGGAL x ORANGTUA (bukti untuk asumsi penggabungan kategori).
+        "distribusi_tinggal_mentah": {int(k): int(v) for k, v in
+                                      df["TINGGAL"].value_counts().sort_index().items()},
+        "crosstab_tinggal_x_orangtua": {
+            f"tinggal_{int(t)}": {f"orangtua_{int(o)}": int(ct.loc[t, o]) for o in ct.columns if ct.loc[t, o] > 0}
+            for t in ct.index
+        },
         "catatan_status_ortu": (
             "Label kategori 1 asumsi salah ketik ('kedua orang tua meninggal' -> 'utuh'); "
             "kategori 2 dan 5 digabung ke 'lainnya'. Menunggu konfirmasi Bu Rita; "
@@ -231,6 +266,9 @@ def _write_qa_report(qa: dict, path: Path) -> None:
     for section, isi in qa.items():
         lines.append(f"## {section.replace('_', ' ').title()}")
         if isinstance(isi, dict):
+            # Fix C2: section kosong jangan tampil seperti laporan terpotong.
+            if not isi:
+                lines.append("- (tidak ada)")
             for k, v in isi.items():
                 lines.append(f"- **{k}**: {v}")
         else:
@@ -280,7 +318,7 @@ def main() -> None:
     assert not df.isna().any().any(), "masih ada missing value setelah cleaning"
     C.DATA_CLEAN.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(C.DATA_CLEAN, index=False)
-    _write_qa_report(qa, C.DATA_CLEAN.parent / "qa_report.md")
+    _write_qa_report(qa, C.QA_REPORT)
     print(f"[01_clean] ditulis: {C.DATA_CLEAN}  shape={df.shape}")
 
 

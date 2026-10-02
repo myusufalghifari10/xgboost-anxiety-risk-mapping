@@ -101,6 +101,11 @@ def build_codebook(features: pd.DataFrame, path: Path = C.CODEBOOK) -> None:
         return f"{s.min():.2f}–{s.max():.2f} (mean {s.mean():.2f}, SD {s.std():.2f})"
 
     n_pos = int(features[C.TARGET_BIN].sum())
+    # Fix C1: angka crosstab dihitung dari data (bukan hardcode) agar tidak pernah basi.
+    n_ortu1 = int((features["d_status_ortu"] == 1).sum())
+    n_ortu1_tinggal1 = int(
+        ((features["d_status_ortu"] == 1) & (features["d_tinggal_grup"] == 1)).sum()
+    )
     baris = [
         "# Codebook — Model #1 XGBoost Risk Mapping",
         "",
@@ -162,14 +167,23 @@ def build_codebook(features: pd.DataFrame, path: Path = C.CODEBOOK) -> None:
         f"| Item terbalik ({', '.join(C.REVERSE_ITEMS)}) | Reverse-score: nilai_baru = {sum(C.LIKERT5_RANGE)} − nilai |",
         "| `VAR00001` | Kolom kosong → dibuang |",
         "",
+        "- **Audit arah item (hasil verifikasi).** `REVERSE_ITEMS=[SOSIAL3]` sudah lengkap: "
+        "semua item bernegasi lain (KECEMASANSTRESS2/9/16/17/22, MASADEPAN3, COPING16–18) sengaja "
+        "TIDAK di-reverse karena tetap searah konstruk/subskalanya (COPING16–18 = subskala "
+        "`coping_negatif`, skor tinggi = makin negatif).",
+        "- **Sensitivitas item 12 (nilai 5).** Nilai invalid diisi median kolom (=2); alternatif "
+        "isi 4 teruji TIDAK mengubah label `y_biner` siswa mana pun.",
+        "",
         "## Asumsi yang Perlu Dikonfirmasi Dosen",
         "",
         "- **Label status orang tua.** Kategori 1 berlabel *\"kedua orang tua meninggal dunia\"* tapi "
-        "226 dari 240 siswa kategori tersebut tinggal bersama ayah dan ibu → label kemungkinan salah "
-        "ketik. Asumsi kerja: kategori 1 = **keluarga utuh**. Kategori 2 (9 siswa, pola mencampur) dan "
-        "kategori 5 (4 siswa, tanpa label) digabung ke **lainnya**. Sisa kategori 3 & 4 dipakai sesuai "
-        "label aslinya. Tersedia 3 versi coding di `config.ORANGTUA_RECODE_VARIANTS` untuk sensitivity analysis.",
-        "- **Ambang `y_biner`.** 2,5 dipilih agar \"sering ke atas\" masuk kategori cemas tinggi; "
+        f"{n_ortu1_tinggal1} dari {n_ortu1} siswa kategori tersebut tinggal bersama ayah dan ibu → label "
+        "kemungkinan salah ketik. Asumsi kerja: kategori 1 = **keluarga utuh**. Kategori 2 (9 siswa, pola "
+        "mencampur) dan kategori 5 (4 siswa, tanpa label) digabung ke **lainnya**. Sisa kategori 3 & 4 "
+        "dipakai sesuai label aslinya. 3 versi coding di `config.ORANGTUA_RECODE_VARIANTS` disiapkan "
+        "untuk sensitivity analysis, namun BELUM dijalankan (fase robustness terpisah).",
+        "- **Ambang `y_biner`.** 2,5 dipilih sebagai titik tengah antara pilihan \"kadang-kadang\" (2) "
+        "dan \"sering\" (3) — siswa dengan rata-rata skor di atasnya masuk kategori cemas tinggi; "
         "ambang alternatif 2,0 dan 2,3 menghasilkan 42,2% dan 25,8% positif — dipakai sebagai bahan "
         "diskusi bila dosen ingin prevalensi lebih tinggi.",
         "- **Temuan penting — `f_sosial` berbeda dari analisis sebelumnya.** Rata-rata blok sosial "
@@ -180,7 +194,8 @@ def build_codebook(features: pd.DataFrame, path: Path = C.CODEBOOK) -> None:
         "faktor sosial menjadi prediktor terkuat di regresi lama (β=0,241), temuan itu perlu dihitung ulang. "
         "Pipeline ini sengaja mengikuti aturan `config.REVERSE_ITEMS` (reverse = benar).",
         "- **Baris duplikat.** Dua baris identik di seluruh kolom tidak dihapus (N tetap 306) agar "
-        "selaras dengan analisis deskriptif sebelumnya; ditandai di `outputs/qa_report.md`.",
+        "selaras dengan analisis deskriptif sebelumnya; ditandai di `outputs/qa_report.md`. Implikasi "
+        "evaluasi: pasangan kembar bisa terbagi ke train dan test (bias optimis <0,5%).",
         "",
         "## Pemakaian Etis",
         "",
@@ -197,7 +212,8 @@ def main() -> None:
     # Bukti level-1: skema & rentang (ATURAN 5 kontrak).
     # Fix R3-7: assert SEBELUM menulis artefak — file invalid tidak boleh sempat tersimpan.
     assert len(C.FEATURE_COLS) == 18, f"config harus punya 18 fitur, ada {len(C.FEATURE_COLS)}"
-    assert feats[C.TARGET_CONT].between(1.0, 4.0).all(), "y_kontinu di luar rentang 1-4"
+    assert feats[C.TARGET_CONT].between(*C.ANXIETY_VALID_RANGE).all(), \
+        f"y_kontinu di luar rentang {C.ANXIETY_VALID_RANGE}"
     assert feats[C.TARGET_BIN].isin([0, 1]).all(), "y_biner harus 0/1"
     assert not feats.isna().any().any(), "fitur masih ada missing value"
     feats.to_parquet(C.FEATURES, index=False)

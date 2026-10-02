@@ -92,7 +92,8 @@ def bootstrap_ci95(
 def per_repeat_table(oof: pd.DataFrame) -> list[dict]:
     """Metrik per ulangan = bukti stabilitas (PLAN bagian 7).
 
-    AUC per ulangan hanya dihitung bila kedua kelas ada di test fold tersebut.
+    AUC per ulangan hanya dihitung bila kedua kelas ada di ULANGAN tersebut
+    (seluruh 306 baris, bukan per fold).
     """
     rows = []
     for rep, g in oof.groupby("repeat"):
@@ -121,8 +122,20 @@ def main() -> None:
     # Fix R3-8: defensif — pasangan (row_id, repeat) harus unik (1 prediksi per siswa per ulangan).
     assert not oof.duplicated(["row_id", "repeat"]).any(), \
         "ada pasangan (row_id, repeat) terduplikasi di OOF — fold/ulangan tidak konsisten"
+    # Fix A4: cek universe — siswa yang hilang SELURUHNYA (305 siswa x 10 ulangan)
+    # tetap memenuhi cek jumlah baris dan keunikan pasangan, sehingga bisa lolos senyap.
+    oof_ids = set(int(r) for r in row_ids)
+    features_ids = set(int(r) for r in pd.read_parquet(cfg.FEATURES, columns=["row_id"])["row_id"])
+    assert oof_ids == features_ids, (
+        "row_id OOF tidak sama dengan features.parquet; "
+        f"hilang: {sorted(features_ids - oof_ids)[:5]} (total {len(features_ids - oof_ids)})"
+    )
     assert y.min() >= cfg.ANXIETY_VALID_RANGE[0] and y.max() <= cfg.ANXIETY_VALID_RANGE[1], \
         f"y_kontinu di luar rentang {cfg.ANXIETY_VALID_RANGE}"
+    # Fix A5: pred_kontinu tanpa guard bisa menyilent-kan metrik NaN ke metrics.json;
+    # y_biner satu kelas membuat AUC/BA NaN secara senyap.
+    assert np.isfinite(pred).all(), "pred_kontinu mengandung NaN/inf — metrik akan jadi NaN"
+    assert np.unique(yb).size == 2, "y_biner OOF hanya satu kelas — AUC/balanced_accuracy tidak terdefinisi"
     assert 0.0 <= pb.min() and pb.max() <= 1.0, "probabilitas biner harus di rentang 0-1"
 
     cont = continuous_metrics(y, pred)

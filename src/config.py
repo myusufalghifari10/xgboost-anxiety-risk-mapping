@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW = ROOT / "data" / "raw" / "INPUT DATA  (1).sav"
 DATA_CLEAN = ROOT / "outputs" / "data_clean.parquet"
 FEATURES = ROOT / "outputs" / "features.parquet"
+QA_REPORT = ROOT / "outputs" / "qa_report.md"
 MODEL_PATH = ROOT / "outputs" / "model_final.ubj"
 MODEL_CLF_PATH = ROOT / "outputs" / "model_final_clf.ubj"
 PREPROCESSOR_PATH = ROOT / "outputs" / "preprocessor.joblib"
@@ -30,9 +31,14 @@ STABILITY_RANKING = ROOT / "outputs" / "stability_ranking.csv"
 REPORT_RINGKAS = TABLE_DIR / "report_ringkas.md"
 TABEL_PERFORMA = TABLE_DIR / "tabel_performa.csv"
 TABEL_FAKTOR = TABLE_DIR / "tabel_faktor.csv"
+RISK_MAP_JURUSAN = TABLE_DIR / "risk_map_jurusan.csv"
+RISK_MAP_JENISKELAMIN = TABLE_DIR / "risk_map_jeniskelamin.csv"
 
 # ---------- Reproducibility ----------
 RANDOM_SEED = 42
+# Parameter dasar XGBoost dipakai 03_train_tune.py DAN 05_explain.py — satu sumber
+# kebenaran agar model penjelas tidak pernah menyimpang dari model yang dievaluasi.
+BASE_XGB = {"random_state": RANDOM_SEED, "n_jobs": -1, "verbosity": 0}
 
 # ---------- Item inventories (nama kolom persis seperti di .sav) ----------
 # Item kecemasan (skala 1-4). Kolom 14 & 20 adalah artefak kalimat terbelah (semua 0).
@@ -112,7 +118,7 @@ TINGGAL_LABELS = {
 # ---------- Target ----------
 # y_kontinu = rata-rata 20 item kecemasan valid (1-4)
 # y_biner   = 1 jika y_kontinu >= ambang; ambang ditetapkan di 02_features (codebook)
-ANXIETY_HIGH_THRESHOLD = 2.5  # >= "sering" -> cemas tinggi (definisi di codebook)
+ANXIETY_HIGH_THRESHOLD = 2.5  # di atas titik tengah "jarang"(2) dan "sering"(3) (skala 1-4; definisi di codebook)
 
 # ---------- 18 fitur input (urutan kolom features.parquet) ----------
 NUMERIC_FEATURES = [
@@ -150,10 +156,10 @@ XGB_SEARCH_SPACE = {
     "reg_alpha": ("float", 1e-4, 10, "log"),
     "reg_lambda": ("float", 0.1, 100, "log"),
 }
-ONE_SE_RULE = True  # aturan 1-SE SELALU diterapkan (PLAN §6); knob dihapus agar tidak drift
+# Catatan: aturan 1-SE (PLAN §6) SELALU diterapkan di 03_train_tune.py dan metrik
+# utama SELALU RMSE (PLAN §7) — sengaja tidak ada knob konfigurasi agar tidak drift.
 
 # ---------- Metrik ----------
-PRIMARY_METRIC = "rmse"   # fungsi latih/tuning (kontinu)
 REPORT_METRICS = ["rmse", "mae", "r2"]           # kontinu
 REPORT_METRICS_BIN = ["auc", "balanced_accuracy", "brier"]  # biner
 
@@ -162,3 +168,4 @@ ZONE_HIJAU_MAX = 1.5    # skor prediksi < 1,5 -> hijau
 ZONE_KUNING_MAX = ANXIETY_HIGH_THRESHOLD  # >= -> merah (satu sumber kebenaran)
 GROUP_RISK_HIGH = 0.5   # proporsi anggota zona merah -> kelompok TINGGI
 GROUP_RISK_MODERATE = 0.25
+GROUP_RISK_MIN_N = 10   # sel kelompok dengan n < ini diberi label "n kecil" di laporan

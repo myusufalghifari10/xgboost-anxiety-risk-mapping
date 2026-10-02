@@ -49,6 +49,19 @@ def load_metrics() -> Dict:
     return json.loads(require(C.METRICS_JSON, "04_evaluate.py").read_text(encoding="utf-8"))
 
 
+def _assert_metrics_complete(metrics: Dict) -> None:
+    """Fail-fast kontrak metrics.json (fix B3) — laporan tidak boleh berisi 'nan' senyap."""
+    cont = metrics.get("continuous") or {}
+    binary = metrics.get("binary") or {}
+    kurang = [k for k in C.REPORT_METRICS if k not in cont]
+    kurang += [k for k in C.REPORT_METRICS_BIN if k not in binary]
+    if kurang:
+        raise KeyError(f"metrics.json kurang kunci metrik: {kurang}")
+    ci = cont.get("ci95")
+    if not isinstance(ci, dict) or not all(k in ci for k in ("rmse", "mae", "r2")):
+        raise KeyError(f"metrics.json ci95 tidak lengkap: {ci!r}")
+
+
 def load_shap_ranking() -> pd.DataFrame:
     """Peringkat faktor dari outputs/shap_global_ranking.csv (ditulis 05_explain.py).
 
@@ -111,9 +124,14 @@ def _oof_skor_per_siswa() -> pd.Series:
     for col in ("row_id", "pred_kontinu"):
         if col not in oof.columns:
             raise KeyError(f"oof_predictions.csv tidak punya kolom '{col}'.")
+    # Fix B5: NaN sebagian (sebagian ulangan) dulu disembunyikan .mean(skipna=True);
+    # sekarang tolak apa pun yang tidak lengkap SEBELUM agregasi per siswa.
+    if oof["pred_kontinu"].isna().any():
+        raise ValueError(
+            "oof_predictions.csv punya pred_kontinu NaN (termasuk NaN sebagian) — "
+            "periksa keluaran 03_train_tune.py."
+        )
     per_siswa = oof.groupby("row_id")["pred_kontinu"].mean()
-    if per_siswa.isna().any():
-        raise ValueError("Ada siswa tanpa prediksi OOF; periksa keluaran 03_train_tune.py.")
     return per_siswa.rename("skor_prediksi")
 
 
@@ -121,14 +139,17 @@ def _oof_skor_per_siswa() -> pd.Series:
 # Tabel
 # ---------------------------------------------------------------------------
 def _ci_bounds(ci) -> tuple:
-    """Terima dua bentuk ci95 dari 04_evaluate: [bawah, atas] atau {bawah, atas}."""
+    """Terima dua bentuk ci95 dari 04_evaluate: [bawah, atas] atau {bawah, atas}.
+
+    Fix B3: bentuk tak dikenal -> raise (dulu return (None, None) dan CI hilang senyap).
+    """
     if ci is None:
         return None, None
     if isinstance(ci, dict):
         return ci.get("bawah", ci.get("lower")), ci.get("atas", ci.get("upper"))
     if isinstance(ci, (list, tuple)) and len(ci) == 2:
         return ci[0], ci[1]
-    return None, None
+    raise ValueError(f"bentuk ci95 tidak dikenal: {ci!r}")
 
 
 def tabel_performa(metrics: Dict, n_trial: int, n_outer: int) -> pd.DataFrame:
@@ -149,8 +170,9 @@ def tabel_performa(metrics: Dict, n_trial: int, n_outer: int) -> pd.DataFrame:
             rows.append({"target": "biner", "metrik": key, "nilai": binary[key]})
     # Fix catatan rev-explain N15: tulis "trial per ronde x jumlah ronde", bukan
     # total baris trials CSV (yang dulu ditulis seolah-olah 250.000 setelan unik).
-    rows.append({"target": "tuning", "metrik": "n_trials", "nilai": int(n_trial)})
-    rows.append({"target": "tuning", "metrik": "n_ronde_outer", "nilai": int(n_outer)})
+    # Fix B9: baris hitungan ditulis int (bukan 500.0) agar tidak salah baca sebagai nilai metrik.
+    rows.append({"target": "tuning", "metrik": "n_trials_per_ronde", "nilai": str(int(n_trial))})
+    rows.append({"target": "tuning", "metrik": "n_ronde_outer", "nilai": str(int(n_outer))})
     return pd.DataFrame(rows)
 
 
@@ -173,7 +195,11 @@ def risk_map(df: pd.DataFrame, skor: pd.Series, by: List[str]) -> pd.DataFrame:
     """Peta zona per kelompok (mis. ['d_jurusan','d_jenis_kelamin']).
 
     Ambang tingkat risiko kelompok diambil dari config (GROUP_RISK_HIGH/MODERATE).
-    Kolom n_hilang ditambahkan supaya penyebut proporsi selalu sama dengan n_siswa.
+    Kolom n_hilang adalah invarian: harus SELALU 0 karena zona_skor fail-fast pada
+    skor NaN, sehingga siswa tanpa prediksi tidak pernah sampai ke groupby.
+
+    Fix A6: kelompok dengan n < GROUP_RISK_MIN_N diberi label "n kecil" karena sel
+    n=1-4 bisa berlabel TINGGI dengan proporsi 100% dan mendominasi policy brief.
     """
     tmp = df[["row_id"] + by].copy()
     tmp = tmp.merge(skor.rename_axis("row_id").reset_index(), on="row_id", how="left")
@@ -190,11 +216,20 @@ def risk_map(df: pd.DataFrame, skor: pd.Series, by: List[str]) -> pd.DataFrame:
         )
         .reset_index()
     )
+    # Fix B4: groupby dropna=True bisa membuang baris senyap (kolom kelompok NaN).
+    assert grouped["n_siswa"].sum() == len(df), \
+        "ada baris terbuang saat groupby risk_map (kolom kelompok mengandung NaN?)"
     grouped["proporsi_merah"] = grouped["n_merah"] / grouped["n_siswa"]
+    assert grouped["proporsi_merah"].notna().all(), "proporsi_merah mengandung NaN"
     grouped["tingkat_risiko_kelompok"] = np.where(
         grouped["proporsi_merah"] >= C.GROUP_RISK_HIGH,
         "TINGGI",
         np.where(grouped["proporsi_merah"] >= C.GROUP_RISK_MODERATE, "SEDANG", "RENDAH"),
+    )
+    # Fix A6: tandai sel kecil — jangan buang barisnya (data apa adanya).
+    kecil_mask = grouped["n_siswa"] < C.GROUP_RISK_MIN_N
+    grouped.loc[kecil_mask, "tingkat_risiko_kelompok"] = (
+        grouped.loc[kecil_mask, "tingkat_risiko_kelompok"] + " (n kecil — interpretasi hati-hati)"
     )
     return grouped.sort_values("proporsi_merah", ascending=False, ignore_index=True)
 
@@ -204,26 +239,65 @@ def risk_map(df: pd.DataFrame, skor: pd.Series, by: List[str]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def tulis_laporan(
     performa: pd.DataFrame, faktor: pd.DataFrame, map_j: pd.DataFrame, drop: Dict,
-    n_trial: int, n_outer: int, n_trial_final: int,
+    n_trial: int, n_outer: int, n_trial_final: int, metrics: Dict, df: pd.DataFrame,
 ) -> Path:
     m = {}
     for _, r in performa.iterrows():
         m[(r["target"], r["metrik"])] = r["nilai"]
 
-    top5 = faktor.head(5)[["fitur", "arah", "mean_abs_shap"]]
+    # Fix B6: konteks statistik dari metrics.json/features (bukan hardcode selain definisi).
+    cont = metrics["continuous"]
+    n_evals = int(cont["n_evals"])
+    n_prediksi = int(cont["n_prediksi"])
+    n_pos = int(df[C.TARGET_BIN].sum())
+    prevalence = 100 * n_pos / len(df)
+    bawah_rmse, atas_rmse = _ci_bounds(cont["ci95"]["rmse"])
+
+    # Fix B9: prosa ambang memakai notasi Indonesia (>= 1,5 dan < 2,5).
+    hijau_s = f"{ZONE_HIJAU_MAX:.1f}".replace(".", ",")
+    kuning_s = f"{ZONE_KUNING_MAX:.1f}".replace(".", ",")
+
+    # Fix A8: total trial eksplisit dan pemisahan klaim test untuk nested vs model final.
+    nested_total = f"{n_trial * n_outer:,}".replace(",", ".")
+    final_total = f"{n_trial_final:,}".replace(",", ".")
+
+    # Fix B7: tampilkan stabilitas (proporsi_top5) + caveat in-sample pada top-5 SHAP.
+    top5 = faktor.head(5)[["fitur", "arah", "mean_abs_shap", "proporsi_top5"]]
     baris_top = "\n".join(
-        f"| {i+1} | {r.fitur} | {r.arah.replace('_', ' ')} | {r.mean_abs_shap:.4f} |"
+        f"| {i+1} | {r.fitur} | {r.arah.replace('_', ' ')} | {r.mean_abs_shap:.4f} | {r.proporsi_top5:.0%} |"
         for i, r in enumerate(top5.itertuples())
     )
     # Fix F5: label 'arah' = kontribusi rata-rata pada sampel ini, BUKAN arah efek/kausal.
     catatan_arah = (
         "_Arah = kontribusi rata-rata SHAP pada sampel ini (menaikkan/menurunkan prediksi "
-        "skor kecemasan), bukan uji sebab-akibat._"
+        "skor kecemasan), bukan uji sebab-akibat. Peringkat SHAP dihitung pada model final "
+        "(in-sample); angka performa di atas berasal dari prediksi out-of-fold._"
     )
-    map_tinggi = map_j[map_j["tingkat_risiko_kelompok"] == "TINGGI"]
+    # Fix A7: klaim drop-HB dibandingkan dengan 1 SD antar fold, bukan hanya tanda rata-rata.
+    selisih = float(drop["selisih_rmse_mean"])
+    sd_selisih = float(drop["selisih_rmse_std"])
+    proporsi_hb = float(drop["proporsi_fold_hb_membantu"])
+    if selisih > sd_selisih:
+        kalimat_hb = (
+            "Arah positif dan lebih besar dari 1 SD antar fold: fitur perilaku sehat "
+            "membantu prediksi pada data ini."
+        )
+    elif selisih < -sd_selisih:
+        kalimat_hb = (
+            "Selisih negatif dan melebihi 1 SD antar fold: menghapus fitur justru "
+            "memperbaiki prediksi (tidak membantu pada data ini)."
+        )
+    else:
+        kalimat_hb = (
+            "Selisih tidak dapat dibedakan dari nol (< 1 SD antar fold): tidak ada "
+            "kontribusi pasti pada data ini — jawaban jujur untuk klaim protektif."
+        )
+    # Fix A6: label TINGGI kini berakhiran " (n kecil ...)" pada sel kecil -> pakai startswith.
+    map_tinggi = map_j[map_j["tingkat_risiko_kelompok"].str.startswith("TINGGI")]
     baris_map = (
         "\n".join(
-            f"- {r.d_jurusan} / {r.d_jenis_kelamin}: {r.proporsi_merah:.0%} siswa zona merah"
+            f"- {r.d_jurusan} / {r.d_jenis_kelamin}: {r.proporsi_merah:.0%} siswa zona merah "
+            f"(n={r.n_siswa}) — {r.tingkat_risiko_kelompok}"
             for r in map_tinggi.head(5).itertuples()
         )
         or "- Tidak ada kelompok dengan proporsi zona merah tinggi."
@@ -232,28 +306,32 @@ def tulis_laporan(
     isi = f"""# Laporan Ringkas — Model 1: Peta Risiko Kecemasan (XGBoost)
 
 ## Ringkasan performa (dari data test yang tidak pernah dipakai training/tuning)
-- Skor kecemasan (kontinu): RMSE = **{m.get(('kontinu','rmse'), float('nan')):.3f}**, MAE = {m.get(('kontinu','mae'), float('nan')):.3f}, R2 = {m.get(('kontinu','r2'), float('nan')):.3f}
-- Kategori cemas tinggi (biner): AUC = **{m.get(('biner','auc'), float('nan')):.3f}**
-- Total hyperparameter yang dicoba: **{n_trial:,} trial x {n_outer} ronde outer-CV**{' (+ ' + f'{n_trial_final:,} trial model final' if n_trial_final else ''} (Optuna; test tidak pernah dilihat proses ini)
+- Skor kecemasan (kontinu): RMSE = **{m[('kontinu','rmse')]:.3f}** (CI95 {bawah_rmse:.3f}–{atas_rmse:.3f}), MAE = {m[('kontinu','mae')]:.3f}, R2 = {m[('kontinu','r2')]:.3f}
+- Kategori cemas tinggi (biner): AUC = **{m[('biner','auc')]:.3f}**
+- Konteks: N = {n_evals} siswa ({n_prediksi} prediksi out-of-fold); kategori cemas tinggi {n_pos} siswa ({prevalence:.1f}%).
+- Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **{n_trial:,} trial per ronde x {n_outer} ronde = {nested_total} trial**.
+- Tuning model final terpisah: **{final_total} trial** pada seluruh 306 siswa (tidak ada angka test yang dikutip dari model final).
 
-## 5 faktor risiko teratas (SHAP)
-| Peringkat | Faktor | Arah | Rata-rata \\|SHAP\\| |
-|---|---|---|---|
+## 5 faktor paling berpengaruh (SHAP)
+| Peringkat | Faktor | Arah | Rata-rata \\|SHAP\\| | Stabil (masuk top-5 antar fold) |
+|---|---|---|---|---|
 {baris_top}
 
 {catatan_arah}
 
 ## Uji klaim perilaku sehat (drop-HB)
-- Menghapus fitur `f_perilaku_sehat` mengubah RMSE test sebesar **{drop['selisih_rmse_mean']:+.4f}** (rata-rata {drop['n_folds']} fold).
-- {'Arah positif berarti fitur perilaku sehat membantu prediksi pada data ini.' if drop['selisih_rmse_mean'] > 0 else 'Arah mendekati nol / negatif berarti tidak ada kontribusi bermakna pada data ini — jawaban jujur untuk klaim protektif.'}
+- Menghapus fitur `f_perilaku_sehat` mengubah RMSE test sebesar **{drop['selisih_rmse_mean']:+.4f}** (rata-rata {drop['n_folds']} fold; SD antar fold = {sd_selisih:.4f}; {proporsi_hb:.0%} fold menunjukkan HB membantu).
+- {kalimat_hb}
 
 ## Kelompok dengan risiko tinggi (zona merah proporsi tinggi)
 {baris_map}
 
 ## Catatan penggunaan
 - Zona merah/kuning/hijau bersifat **agregat per kelompok** untuk policy brief dan triase guru BK; bukan label diagnosis individual.
-- Ambang zona: hijau < {ZONE_HIJAU_MAX}, kuning {ZONE_HIJAU_MAX}-{ZONE_KUNING_MAX}, merah >= {ZONE_KUNING_MAX} (skala 1-4, mengikuti ambang kategori tinggi di config).
+- Ambang zona: hijau < {hijau_s}; kuning >= {hijau_s} dan < {kuning_s}; merah >= {kuning_s} (skala 1-4, mengikuti ambang kategori tinggi di config).
 - Skor risiko per siswa memakai prediksi out-of-fold (bukan prediksi in-sample), sehingga proporsi zona merah tidak terinflasi oleh data latih.
+- Probabilitas biner berasal dari model dengan `scale_pos_weight` (target timpang): probabilitas BELUM terkalibrasi terhadap prevalensi asli sehingga tidak boleh dibaca sebagai risiko absolut per siswa.
+- `balanced_accuracy` dihitung pada ambang tetap 0,5 (bukan ambang optimal), sedangkan AUC tetap sahih karena hanya bergantung urutan peringkat.
 - Menggunakan bahasa asosiatif: data cross-sectional, korelasi bukan sebab-akibat.
 """
     C.TABLE_DIR.mkdir(parents=True, exist_ok=True)
@@ -273,6 +351,7 @@ def run_all() -> None:
     assert zona_skor(C.ZONE_HIJAU_MAX - 1e-9) == "hijau", "batas bawah zona hijau"
 
     metrics = load_metrics()
+    _assert_metrics_complete(metrics)
     meta = load_model_meta()
     outer = meta.get("outer") or {}
     # Fix R3-4: fail-fast bila meta tuning hilang/tidak valid (sebelumnya fail-open
@@ -282,7 +361,12 @@ def run_all() -> None:
     if not outer or "folds" not in outer or "repeats" not in outer:
         raise KeyError("best_params.json tidak punya 'outer.folds/repeats' — jalankan 03_train_tune.py versi lengkap.")
     n_trial = int(meta["n_trials_per_outer_fold"])
-    n_trial_final = int(meta.get("n_trials_final", 0))
+    # Fix B3: jangan fail-open — kunci hilang harus gagal, bukan diam-diam 0.
+    if "n_trials_final" not in meta:
+        raise KeyError(
+            "best_params.json tidak punya 'n_trials_final' — jalankan 03_train_tune.py versi lengkap."
+        )
+    n_trial_final = int(meta["n_trials_final"])
     n_outer = int(outer["folds"]) * int(outer["repeats"])
     if n_trial <= 0 or n_outer <= 0:
         raise ValueError(f"meta tuning tidak valid: n_trial={n_trial}, n_outer={n_outer}")
@@ -294,25 +378,32 @@ def run_all() -> None:
 
     assert {"fitur", "mean_abs_shap", "arah"} <= set(ranking.columns), \
         f"shap_global_ranking.csv kolom tak lengkap: {list(ranking.columns)}"
-    assert "fitur" in kestabilan.columns, \
-        f"stability_ranking.csv kolom tak lengkap: {list(kestabilan.columns)}"
+    assert "proporsi_top5" in kestabilan.columns, \
+        f"stability_ranking.csv tidak punya proporsi_top5: {list(kestabilan.columns)}"
+    # Fix B4: fitur yang tidak ada di kedua artefak akan jadi NaN senyap saat merge.
+    assert set(ranking["fitur"]) == set(kestabilan["fitur"]), (
+        "fitur shap_global_ranking.csv != stability_ranking.csv: "
+        f"{sorted(set(ranking['fitur']) ^ set(kestabilan['fitur']))}"
+    )
     assert len(skor) == len(df), "prediksi OOF harus menutup semua siswa"
 
     C.TABLE_DIR.mkdir(parents=True, exist_ok=True)
     tabel_performa(metrics, n_trial, n_outer).to_csv(C.TABEL_PERFORMA, index=False)
 
     faktor = tabel_faktor(ranking, kestabilan)
+    # Fix B10: cegah AttributeError dari r.arah.replace bila kolom arah diedit manual.
+    assert faktor["arah"].notna().all(), "kolom arah mengandung NaN (CSV hasil suntingan?)"
     faktor.to_csv(C.TABEL_FAKTOR, index=False)
 
     map_j = risk_map(df, skor, ["d_jurusan", "d_jenis_kelamin"])
-    map_j.to_csv(C.TABLE_DIR / "risk_map_jurusan.csv", index=False)
+    map_j.to_csv(C.RISK_MAP_JURUSAN, index=False)
 
     map_k = risk_map(df, skor, ["d_jenis_kelamin"])
-    map_k.to_csv(C.TABLE_DIR / "risk_map_jeniskelamin.csv", index=False)
+    map_k.to_csv(C.RISK_MAP_JENISKELAMIN, index=False)
 
     tulis_laporan(
         tabel_performa(metrics, n_trial, n_outer), faktor, map_j, drop,
-        n_trial, n_outer, n_trial_final,
+        n_trial, n_outer, n_trial_final, metrics, df,
     )
 
 

@@ -15,6 +15,10 @@ Keluaran (nama persis sesuai CONTRACT.md / konstanta path di config.py):
   outputs/figures/shap_interaction_*.png  interaksi perilaku sehat x dukungan/tekanan (8.4)
   outputs/figures/pdp_*.png             partial dependence fitur kunci (8.6)
 
+Kedelapan artefak di atas ditulis seluruhnya oleh run_all() dalam sekali jalan;
+fungsi shap_global_binary (eksperimen model biner) sengaja TIDAK dipanggil run_all
+(di luar cakupan PLAN bagian 8 fase ini).
+
 Sudut yang disengaja:
   - TreeSHAP dipilih karena model XGBoost berbasis pohon; interaksi diambil dari
     shap_interaction_values (tanpa dependensi tambahan) dan selalu disimetresisasi
@@ -57,7 +61,7 @@ FOCUS_PAIRS: Sequence[Tuple[str, str]] = tuple(
 # tidak dijalankan di run_all() — di luar cakupan PLAN bagian 8 pada fase ini.
 CLF_MODEL_PATH: Path | None = None
 
-BASE_XGB = {"random_state": C.RANDOM_SEED, "n_jobs": -1, "verbosity": 0}
+BASE_XGB = C.BASE_XGB  # fix C4: satu sumber di config (dulu duplikat identik dengan 03)
 # Path artefak diambil dari config.py (sumber kebenaran tunggal), bukan literal.
 OUT_GLOBAL_RANKING = C.SHAP_GLOBAL_RANKING
 OUT_INTERACTION = C.INTERACTION_SUMMARY
@@ -189,13 +193,23 @@ def tuned_model_factory() -> Callable[[], object]:
 
 
 def assert_schema_matches_model(model, X_encoded: pd.DataFrame) -> None:
-    """Pastikan kolom ter-encode identik dengan yang dilatih model (kontrak revisi)."""
+    """Pastikan skema kolom ter-encode identik dengan yang dilatih model (kontrak revisi).
+
+    Fix C5: model dilatih pada numpy (tanpa nama kolom) sehingga booster.feature_names
+    = None dan cek nama lama selalu dilewati tanpa menahan apa pun. Cek jumlah kolom
+    terhadap booster.num_features() benar-benar menahan mismatch skema.
+    """
     booster = model.get_booster()
     names = booster.feature_names
     if names is not None and list(X_encoded.columns) != list(names):
         raise ValueError(
             "Skema penjelasan != skema model. "
             f"Model: {list(names)}; hasil encode: {list(X_encoded.columns)}."
+        )
+    if X_encoded.shape[1] != booster.num_features():
+        raise ValueError(
+            f"Jumlah kolom hasil encode ({X_encoded.shape[1]}) != jumlah fitur model "
+            f"({booster.num_features()})."
         )
 
 
@@ -541,7 +555,11 @@ def plot_partial_dependence(
     paths: List[Path] = []
     for feat in features:
         if feat not in X.columns:
-            continue
+            # Fix C5: deliverable tidak boleh hilang senyap — fail-fast seperti scatter.
+            raise KeyError(
+                f"Fitur PDP '{feat}' tidak ada di matriks ter-encode; "
+                "periksa PD_FEATURES terhadap FEATURE_COLS/encoding."
+            )
         # Fix F2(a): sklearn 1.9 mengembalikan Bunch/dict; unpack posisi menghasilkan
         # string key (silent bug: grafik berisi 1 titik sampah). Akses by-key.
         pdp = partial_dependence(model, X, [feat], kind="average", grid_resolution=20)

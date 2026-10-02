@@ -2,7 +2,8 @@
 
 Skema (PLAN bagian 5-6):
     Outer: OUTER_FOLDS x OUTER_REPEATS, shuffle, seed per ulangan.
-           Test fold = 61 baris, TIDAK PERNAH dipakai tuning maupun pemilihan setelan.
+           Test fold = 62/61 baris (306 dibagi 5 -> [62,61,61,61,61], fold pertama dapat 62),
+           TIDAK PERNAH dipakai tuning maupun pemilihan setelan.
     Inner: tuning Optuna HANYA pada data train; skor tiap trial = RMSE pada
            inner-validation fold (out-of-sample), bukan in-sample.
            N_TRIALS_PER_OUTER_FOLD trial per ronde outer; N_TRIALS_FINAL trial
@@ -55,7 +56,7 @@ PREPROCESSOR_PATH = cfg.PREPROCESSOR_PATH
 BEST_PARAMS_JSON = cfg.BEST_PARAMS_JSON
 PER_FOLD_CSV = cfg.PER_FOLD_TUNING_CSV
 
-BASE_XGB = {"random_state": cfg.RANDOM_SEED, "n_jobs": -1, "verbosity": 0}
+BASE_XGB = cfg.BASE_XGB  # fix C4: satu sumber di config (dulu duplikat di 03 dan 05)
 
 
 # ---------------------------------------------------------------- data & encoding
@@ -168,7 +169,13 @@ def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict
     # Fix blocker rev-model #2: SE dari daftar skor per-fold yang tersimpan,
     # bukan dari running mean kumulatif (yang membuat ambang terlalu sempit).
     best_folds = trial_fold_scores(best)
-    inner_se = float(np.std(best_folds, ddof=1) / np.sqrt(len(best_folds))) if len(best_folds) > 1 else 0.0
+    # Fix B1: jangan diam-diam jatuh ke argmin saat daftar skor per-fold hilang/incomplete.
+    if len(best_folds) != cfg.INNER_FOLDS:
+        raise RuntimeError(
+            f"fold_scores trial terbaik tidak lengkap: {len(best_folds)} != {cfg.INNER_FOLDS}; "
+            "standard error aturan 1-SE tidak bisa dihitung dengan benar."
+        )
+    inner_se = float(np.std(best_folds, ddof=1) / np.sqrt(len(best_folds)))
     threshold = best.value + inner_se
     within = [t for t in complete if t.value <= threshold]
     chosen = min(within, key=lambda t: simplicity_key(t.params))
@@ -191,16 +198,17 @@ def std_of_best_folds(trial: optuna.Trial) -> float:
 
 
 def simplicity_key(params: dict) -> tuple:
-    """Urutan 'paling sederhana dulu' untuk aturan 1-SE: pohon lebih sedikit & dangkal,
-    regularisasi lebih kuat, anak lebih banyak (lebih sedikit split), learning_rate kecil.
+    """Urutan 'paling sederhana dulu' untuk aturan 1-SE (fix A1).
 
-    Fix F3: min() memilih nilai terkecil, jadi kunci 'lebih sederhana' harus mengecil
-    saat model menyederhana: reg_alpha/reg_lambda/min_child_weight lebih BESAR = lebih
-    sederhana -> di-negasi; learning_rate lebih KECIL = lebih sederhana -> apa adanya.
+    Definisi 'sederhana' = estimasi total daun ``n_estimators * 2**max_depth`` lebih kecil
+    dulu; bila total daun sama, regularisasi lebih kuat (reg_alpha/reg_lambda/
+    min_child_weight lebih BESAR) dan learning_rate lebih kecil dipilih lebih dulu.
+    Kunci lama (n_estimators dulu) terbukti bisa memilih model 1,2 juta daun di atas
+    model 4.800 daun pada tie 1-SE. min() memilih nilai terkecil, jadi kunci
+    'lebih sederhana' harus mengecil saat model menyederhana.
     """
     return (
-        params["n_estimators"],
-        params["max_depth"],
+        params["n_estimators"] * 2 ** params["max_depth"],
         -params["reg_alpha"],
         -params["reg_lambda"],
         -params["min_child_weight"],
@@ -213,13 +221,18 @@ def trial_record(trial: optuna.Trial) -> dict:
 
     Nama kolom 'mean_test_rmse' mengikuti kontrak, tetapi NILAINYA adalah RMSE
     inner-CV pada data train — test fold sengaja belum tersentuh saat tuning.
+    Fix B2: placeholder numerik memakai NaN (bukan string "") agar kolom CSV
+    tetap numerik dan bisa dihitung pembaca.
     """
+    durasi = getattr(trial, "duration", None)
     return {
         "trial_number": trial.number,
         "params": json.dumps(trial.params, sort_keys=True),
-        "mean_test_rmse": trial.value if trial.value is not None else "",
-        "std_test_rmse": std_of_best_folds(trial) if trial.state == optuna.trial.TrialState.COMPLETE else "",
-        "duration": getattr(trial, "duration", None).total_seconds() if getattr(trial, "duration", None) else "",
+        "mean_test_rmse": trial.value if trial.value is not None else np.nan,
+        "std_test_rmse": (
+            std_of_best_folds(trial) if trial.state == optuna.trial.TrialState.COMPLETE else np.nan
+        ),
+        "duration": durasi.total_seconds() if durasi is not None else np.nan,
     }
 
 
@@ -229,9 +242,14 @@ def scale_pos_weight(y_bin: np.ndarray, konteks: str) -> float:
 
     Fix temuan round-2 R2-4: target biner hanya 43/306 siswa (14,1%) positif.
     Tanpa class weighting, XGBClassifier condong ke kelas mayoritas sehingga
-    balanced_accuracy ~0,5 dan Brier didominasi kelas 0 — keduanya tidak
-    interpretable di metrics.json. Nilai dihitung per fold dari data TRAIN,
-    bukan dari keseluruhan data (info test tidak boleh bocor).
+    balanced_accuracy ~0,5 (tidak informatif).
+
+    Fix A2 (klaim lama terbalik): weighting membantu balanced_accuracy, tetapi
+    justru MENGGESER probabilitas ke prior 50/50 sehingga probabilitas TIDAK lagi
+    terkalibrasi dan Brier dari model berbobot BUKAN ukuran kualitas probabilitas
+    untuk prevalensi asli 14,1% — Brier harus dikutip dengan caveat kalibrasi.
+    AUC tetap sahih karena hanya bergantung urutan peringkat. Nilai dihitung per
+    fold dari data TRAIN, bukan dari keseluruhan data (info test tidak boleh bocor).
     """
     pos = int(np.sum(y_bin == 1))
     neg = int(np.sum(y_bin == 0))
@@ -303,9 +321,9 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tupl
                 "repeat": rep, "fold": fold,
                 "n_train": int(len(tr)), "n_test": int(len(va)),
                 "test_rmse": fold_rmse,
-                "inner_best_rmse": min(
-                    t["mean_test_rmse"] for t in trials if t["mean_test_rmse"] != ""
-                ),
+                "inner_best_rmse": float(min(
+                    t["mean_test_rmse"] for t in trials if not pd.isna(t["mean_test_rmse"])
+                )),
                 "duration_sec": round(time.time() - t0, 1),
             })
             print(
