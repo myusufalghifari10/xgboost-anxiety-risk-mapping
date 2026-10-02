@@ -1,6 +1,7 @@
-# DATA & PLAN TIDAK DI-PUSH (data sensitif responden di bawah umur; plan = local only)
+# DATA & PLAN/CONTRACT TIDAK DI-PUSH (data sensitif responden di bawah umur; dokumen proses = local only)
 data/
 PLAN.md
+CONTRACT.md
 *.sav
 *.xlsx
 *.xls

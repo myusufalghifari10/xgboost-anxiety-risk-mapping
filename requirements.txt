@@ -1,0 +1,10 @@
+# Environment pipeline (install terpisah, setelah kode selesai — JANGAN sekarang)
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.4
+pyarrow>=14
+pyreadstat>=1.2
+matplotlib>=3.8
+xgboost>=2.0
+optuna>=3.5
+shap>=0.44
