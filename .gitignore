@@ -1,0 +1,30 @@
+# DATA & PLAN TIDAK DI-PUSH (data sensitif responden di bawah umur; plan = local only)
+data/
+PLAN.md
+*.sav
+*.xlsx
+*.xls
+*.csv
+*.parquet
+
+# Artefak besar / model
+*.pkl
+*.joblib
+*.ubj
+*.model
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Optuna / cache
+*.db
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
