@@ -283,7 +283,7 @@ def global_ranking(shap_values: np.ndarray, columns: Sequence[str]) -> pd.DataFr
             "fitur": list(columns),
             "mean_abs_shap": mean_abs,
             "mean_shap_signed": mean_signed,
-            "arah": np.where(mean_signed >= 0, "meningkatkan_risiko", "menurunkan_risiko"),
+            "arah": np.where(mean_signed >= 0, "kontribusi_rata2_menaikkan", "kontribusi_rata2_menurunkan"),
         }
     ).sort_values("mean_abs_shap", ascending=False, ignore_index=True)
     out.insert(0, "peringkat", np.arange(1, len(out) + 1))
@@ -299,7 +299,7 @@ def plot_shap_global(ranking: pd.DataFrame, top_n: int = N_FEATURES_EXPECTED) ->
 
     top = ranking.head(top_n)
     colors = [
-        "#c0392b" if a == "meningkatkan_risiko" else "#1e8449" for a in top["arah"]
+        "#c0392b" if a == "kontribusi_rata2_menaikkan" else "#1e8449" for a in top["arah"]
     ]
     fig, ax = plt.subplots(figsize=(9, 0.45 * len(top) + 1.5))
     ax.barh(top["fitur"][::-1], top["mean_abs_shap"][::-1], color=colors[::-1])
@@ -327,7 +327,7 @@ def shap_global_binary(model_clf, X: pd.DataFrame) -> pd.DataFrame:
             "fitur": columns,
             "mean_abs_shap": mean_abs,
             "mean_shap_signed": mean_signed,
-            "arah": np.where(mean_signed >= 0, "meningkatkan_risiko", "menurunkan_risiko"),
+            "arah": np.where(mean_signed >= 0, "kontribusi_rata2_menaikkan", "kontribusi_rata2_menurunkan"),
         }
     ).sort_values("mean_abs_shap", ascending=False, ignore_index=True)
     out.insert(0, "peringkat", np.arange(1, len(out) + 1))
@@ -436,7 +436,14 @@ def aggregate_interactions_to_source(inter: np.ndarray, feature_columns: Sequenc
 
 
 def focus_interactions(inter: np.ndarray, columns: Sequence[str]) -> Dict[str, object]:
-    """Rata-rata |interaksi| untuk pasangan fokus (perilaku sehat x Dukungan/tekanan)."""
+    """Rata-rata |interaksi| untuk pasangan fokus (perilaku sehat x Dukungan/tekanan).
+
+    Konvensi SHAP interaction (catatan N3/F5 review):
+    - Nilai luar diagonal = SETENGAH efek interaksi pasangan (definisi SHAP membagi
+      simetris; efek penuh = 2x nilai bila dikutip di paper).
+    - Diagonal fitur kategorikal bisa != 0 setelah agregasi one-hot ke fitur sumber
+      (pasangan dummy satu-fitur jatuh ke diagonal) — bukan main effect murni.
+    """
     resolved = []
     for a, b in FOCUS_PAIRS:
         if a not in columns or b not in columns:
@@ -446,6 +453,11 @@ def focus_interactions(inter: np.ndarray, columns: Sequence[str]) -> Dict[str, o
     return {
         "pairs": [{"fitur_a": a, "fitur_b": b, "mean_abs_interaksi": v} for a, b, v in resolved],
         "semua_fokus_tersedia": len(resolved) == len(FOCUS_PAIRS),
+        "cara_baca": (
+            "Nilai = rata-rata |SHAP interaction| luar diagonal = SETENGAH efek interaksi "
+            "pasangan (konvensi SHAP membagi simetris; efek penuh = 2x). Diagonal fitur "
+            "kategorikal bisa != 0 setelah agregasi one-hot (bukan main effect murni)."
+        ),
     }
 
 
@@ -530,13 +542,14 @@ def plot_partial_dependence(
     for feat in features:
         if feat not in X.columns:
             continue
-        average, grid_values = partial_dependence(
-            model, X, [feat], kind="average", grid_resolution=20
-        )
-        average = np.asarray(average).ravel()
-        grid = np.asarray(grid_values[0]).ravel()
+        # Fix F2(a): sklearn 1.9 mengembalikan Bunch/dict; unpack posisi menghasilkan
+        # string key (silent bug: grafik berisi 1 titik sampah). Akses by-key.
+        pdp = partial_dependence(model, X, [feat], kind="average", grid_resolution=20)
+        average = np.asarray(pdp["average"]).ravel()
+        grid = np.asarray(pdp["grid_values"][0]).ravel()
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
-        ax.scatter(grid, average, ".-", color="#c0392b", markersize=4)
+        # Fix F2(b): posisi ke-3 scatter = ukuran marker, bukan format string -> plot.
+        ax.plot(grid, average, ".-", color="#c0392b", markersize=4)
         ax.set_xlabel(feat)
         ax.set_ylabel("Prediksi rata-rata (skor kecemasan)")
         ax.set_title(f"Partial dependence: {feat}")

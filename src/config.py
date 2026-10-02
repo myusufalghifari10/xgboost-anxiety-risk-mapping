@@ -42,7 +42,6 @@ ANXIETY_SPLIT_PAIRS = [("KECEMASANSTRESS13", "KECEMASANSTRESS14"),
                        ("KECEMASANSTRESS19", "KECEMASANSTRESS20")]
 ANXIETY_DEAD_COLS = ["KECEMASANSTRESS14", "KECEMASANSTRESS20"]
 ANXIETY_VALID_RANGE = (1, 4)
-ANXIETY_OUT_OF_RANGE_FIX = {"KECEMASANSTRESS12": 5}  # 1 kasus -> missing -> median
 
 # Item faktor tekanan (skala 1-5)
 FACTOR_ITEMS = {
@@ -151,7 +150,7 @@ XGB_SEARCH_SPACE = {
     "reg_alpha": ("float", 1e-4, 10, "log"),
     "reg_lambda": ("float", 0.1, 100, "log"),
 }
-ONE_SE_RULE = True  # pilih model lebih sederhana bila skor dalam 1 SE dari yang terbaik
+ONE_SE_RULE = True  # aturan 1-SE SELALU diterapkan (PLAN §6); knob dihapus agar tidak drift
 
 # ---------- Metrik ----------
 PRIMARY_METRIC = "rmse"   # fungsi latih/tuning (kontinu)
@@ -160,6 +159,6 @@ REPORT_METRICS_BIN = ["auc", "balanced_accuracy", "brier"]  # biner
 
 # ---------- Zona risiko & ambang kelompok (PLAN §10, permintaan rev-explain N7/N9) ----------
 ZONE_HIJAU_MAX = 1.5    # skor prediksi < 1,5 -> hijau
-ZONE_KUNING_MAX = 2.5   # = ANXIETY_HIGH_THRESHOLD; >= -> merah
+ZONE_KUNING_MAX = ANXIETY_HIGH_THRESHOLD  # >= -> merah (satu sumber kebenaran)
 GROUP_RISK_HIGH = 0.5   # proporsi anggota zona merah -> kelompok TINGGI
 GROUP_RISK_MODERATE = 0.25

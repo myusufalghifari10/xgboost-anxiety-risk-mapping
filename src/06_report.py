@@ -203,7 +203,8 @@ def risk_map(df: pd.DataFrame, skor: pd.Series, by: List[str]) -> pd.DataFrame:
 # Laporan ringkas
 # ---------------------------------------------------------------------------
 def tulis_laporan(
-    performa: pd.DataFrame, faktor: pd.DataFrame, map_j: pd.DataFrame, drop: Dict, n_trial: int, n_outer: int
+    performa: pd.DataFrame, faktor: pd.DataFrame, map_j: pd.DataFrame, drop: Dict,
+    n_trial: int, n_outer: int, n_trial_final: int,
 ) -> Path:
     m = {}
     for _, r in performa.iterrows():
@@ -213,6 +214,11 @@ def tulis_laporan(
     baris_top = "\n".join(
         f"| {i+1} | {r.fitur} | {r.arah.replace('_', ' ')} | {r.mean_abs_shap:.4f} |"
         for i, r in enumerate(top5.itertuples())
+    )
+    # Fix F5: label 'arah' = kontribusi rata-rata pada sampel ini, BUKAN arah efek/kausal.
+    catatan_arah = (
+        "_Arah = kontribusi rata-rata SHAP pada sampel ini (menaikkan/menurunkan prediksi "
+        "skor kecemasan), bukan uji sebab-akibat._"
     )
     map_tinggi = map_j[map_j["tingkat_risiko_kelompok"] == "TINGGI"]
     baris_map = (
@@ -228,12 +234,14 @@ def tulis_laporan(
 ## Ringkasan performa (dari data test yang tidak pernah dipakai training/tuning)
 - Skor kecemasan (kontinu): RMSE = **{m.get(('kontinu','rmse'), float('nan')):.3f}**, MAE = {m.get(('kontinu','mae'), float('nan')):.3f}, R2 = {m.get(('kontinu','r2'), float('nan')):.3f}
 - Kategori cemas tinggi (biner): AUC = **{m.get(('biner','auc'), float('nan')):.3f}**
-- Total hyperparameter yang dicoba: **{n_trial:,} trial x {n_outer} ronde outer-CV** (Optuna; test tidak pernah dilihat proses ini)
+- Total hyperparameter yang dicoba: **{n_trial:,} trial x {n_outer} ronde outer-CV**{' (+ ' + f'{n_trial_final:,} trial model final' if n_trial_final else ''} (Optuna; test tidak pernah dilihat proses ini)
 
 ## 5 faktor risiko teratas (SHAP)
 | Peringkat | Faktor | Arah | Rata-rata \\|SHAP\\| |
 |---|---|---|---|
 {baris_top}
+
+{catatan_arah}
 
 ## Uji klaim perilaku sehat (drop-HB)
 - Menghapus fitur `f_perilaku_sehat` mengubah RMSE test sebesar **{drop['selisih_rmse_mean']:+.4f}** (rata-rata {drop['n_folds']} fold).
@@ -267,8 +275,17 @@ def run_all() -> None:
     metrics = load_metrics()
     meta = load_model_meta()
     outer = meta.get("outer") or {}
-    n_trial = int(meta.get("n_trials_per_outer_fold", 0))
-    n_outer = int(outer.get("folds", 0)) * int(outer.get("repeats", 0))
+    # Fix R3-4: fail-fast bila meta tuning hilang/tidak valid (sebelumnya fail-open
+    # -> laporan menulis "0 trial x 0 ronde" tanpa gagal).
+    if "n_trials_per_outer_fold" not in meta:
+        raise KeyError("best_params.json tidak punya 'n_trials_per_outer_fold' — jalankan 03_train_tune.py versi lengkap.")
+    if not outer or "folds" not in outer or "repeats" not in outer:
+        raise KeyError("best_params.json tidak punya 'outer.folds/repeats' — jalankan 03_train_tune.py versi lengkap.")
+    n_trial = int(meta["n_trials_per_outer_fold"])
+    n_trial_final = int(meta.get("n_trials_final", 0))
+    n_outer = int(outer["folds"]) * int(outer["repeats"])
+    if n_trial <= 0 or n_outer <= 0:
+        raise ValueError(f"meta tuning tidak valid: n_trial={n_trial}, n_outer={n_outer}")
     ranking = load_shap_ranking()
     kestabilan = load_stability()
     drop = load_drop_hb()
@@ -294,7 +311,8 @@ def run_all() -> None:
     map_k.to_csv(C.TABLE_DIR / "risk_map_jeniskelamin.csv", index=False)
 
     tulis_laporan(
-        tabel_performa(metrics, n_trial, n_outer), faktor, map_j, drop, n_trial, n_outer
+        tabel_performa(metrics, n_trial, n_outer), faktor, map_j, drop,
+        n_trial, n_outer, n_trial_final,
     )
 
 

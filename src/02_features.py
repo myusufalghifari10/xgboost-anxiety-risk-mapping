@@ -23,6 +23,9 @@ def load_clean(path: Path = C.DATA_CLEAN) -> pd.DataFrame:
     if not path.exists():
         _fail(f"file data bersih tidak ditemukan: {path} — jalankan 01_clean.py lebih dulu")
     df = pd.read_parquet(path)
+    # Fix R3-3: protek keselarasan index — assignment Series di build_features align
+    # by label; index non-default akan menghasilkan baris salah tanpa error.
+    df = df.reset_index(drop=True)
     for col in ("Kelas", "Jurusan", "Umur", "JK", "TINGGAL", "ORANGTUA"):
         if col not in df.columns:
             _fail(f"kolom demografi mentah hilang di data bersih: {col}")
@@ -191,16 +194,17 @@ def build_codebook(features: pd.DataFrame, path: Path = C.CODEBOOK) -> None:
 def main() -> None:
     df = load_clean()
     feats = build_features(df)
+    # Bukti level-1: skema & rentang (ATURAN 5 kontrak).
+    # Fix R3-7: assert SEBELUM menulis artefak — file invalid tidak boleh sempat tersimpan.
+    assert len(C.FEATURE_COLS) == 18, f"config harus punya 18 fitur, ada {len(C.FEATURE_COLS)}"
+    assert feats[C.TARGET_CONT].between(1.0, 4.0).all(), "y_kontinu di luar rentang 1-4"
+    assert feats[C.TARGET_BIN].isin([0, 1]).all(), "y_biner harus 0/1"
+    assert not feats.isna().any().any(), "fitur masih ada missing value"
     feats.to_parquet(C.FEATURES, index=False)
     build_codebook(feats)
     print(f"[02_features] ditulis: {C.FEATURES}  shape={feats.shape}")
     print(f"[02_features] target: mean={feats[C.TARGET_CONT].mean():.3f}, "
           f"positif={int(feats[C.TARGET_BIN].sum())}/{len(feats)}")
-    # Bukti level-1: skema & rentang (ATURAN 5 kontrak)
-    assert len(C.FEATURE_COLS) == 18, f"config harus punya 18 fitur, ada {len(C.FEATURE_COLS)}"
-    assert feats[C.TARGET_CONT].between(1.0, 4.0).all(), "y_kontinu di luar rentang 1-4"
-    assert feats[C.TARGET_BIN].isin([0, 1]).all(), "y_biner harus 0/1"
-    assert not feats.isna().any().any(), "fitur masih ada missing value"
 
 
 if __name__ == "__main__":

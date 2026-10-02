@@ -36,7 +36,7 @@ import joblib
 import numpy as np
 import optuna
 import pandas as pd
-from optuna.pruning import TrialPruned
+from optuna.exceptions import TrialPruned  # optuna 5.x: modul 'optuna.pruning' sudah tidak ada
 from optuna.samplers import TPESampler
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import mean_squared_error
@@ -139,6 +139,7 @@ def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict
     study = optuna.create_study(
         direction="minimize",
         sampler=TPESampler(seed=seed),  # seed sampler dari config
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),  # fix F4: sebelumnya Nopruner (docstring bohong)
     )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -191,14 +192,19 @@ def std_of_best_folds(trial: optuna.Trial) -> float:
 
 def simplicity_key(params: dict) -> tuple:
     """Urutan 'paling sederhana dulu' untuk aturan 1-SE: pohon lebih sedikit & dangkal,
-    regularisasi lebih kuat, anak lebih banyak (lebih sedikit split)."""
+    regularisasi lebih kuat, anak lebih banyak (lebih sedikit split), learning_rate kecil.
+
+    Fix F3: min() memilih nilai terkecil, jadi kunci 'lebih sederhana' harus mengecil
+    saat model menyederhana: reg_alpha/reg_lambda/min_child_weight lebih BESAR = lebih
+    sederhana -> di-negasi; learning_rate lebih KECIL = lebih sederhana -> apa adanya.
+    """
     return (
         params["n_estimators"],
         params["max_depth"],
-        params["reg_alpha"],
-        params["reg_lambda"],
-        params["min_child_weight"],
-        -params["learning_rate"],
+        -params["reg_alpha"],
+        -params["reg_lambda"],
+        -params["min_child_weight"],
+        params["learning_rate"],
     )
 
 
@@ -324,7 +330,7 @@ def train_final(df: pd.DataFrame, params: dict) -> list[str]:
 
     reg = XGBRegressor(**params, **BASE_XGB)
     reg.fit(X, df[cfg.TARGET_CONT].to_numpy(dtype=float))
-    reg.save_booster(cfg.MODEL_PATH)
+    reg.save_model(cfg.MODEL_PATH)  # fix F1: save_booster() tidak ada di xgboost 3.x
 
     y_bin_full = df[cfg.TARGET_BIN].to_numpy(dtype=int)
     clf = XGBClassifier(
@@ -334,7 +340,7 @@ def train_final(df: pd.DataFrame, params: dict) -> list[str]:
         **BASE_XGB,
     )
     clf.fit(X, y_bin_full)
-    clf.save_booster(MODEL_CLF_PATH)
+    clf.save_model(MODEL_CLF_PATH)  # fix F1: save_booster() tidak ada di xgboost 3.x
     return encoded_feature_names(pre)
 
 

@@ -141,10 +141,11 @@ def _reverse_items(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
     for col in C.REVERSE_ITEMS:
         if col not in df.columns:
             _fail(f"kolom item terbalik tidak ada: {col}")
-        before = df[col].copy()
         df[col] = (lo + hi) - df[col]
-        if not (df[col] + before == lo + hi).all():  # sanity: transformasi harus involusi di titik uji
-            _fail(f"reverse-score gagal pada kolom {col}")
+        # Fix R3-2: cek lama (df[col]+before == lo+hi) tautologi selalu True; cek baru
+        # benar-benar memvalidasi hasil reverse ada di rentang & tanpa missing.
+        if not df[col].between(lo, hi).all():
+            _fail(f"nilai di luar rentang {lo}-{hi} atau missing pada kolom {col} setelah reverse-score")
         done.append(col)
     qa["reverse_item"] = {
         "item": done,
@@ -164,6 +165,13 @@ def _recode_demographics(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
     unknown_ortu = sorted(set(df["ORANGTUA"].dropna().unique()) - set(C.ORANGTUA_RECODE))
     if unknown_ortu:
         _fail(f"kode ORANGTUA di luar peta recode: {unknown_ortu}")
+
+    # Fix R3-1: NaN pada kolom string -> astype(str) menjadi kategori "nan" palsu yang
+    # lolos guard missing; tolak lebih dulu dengan pesan spesifik.
+    for col_str in ("JK", "Jurusan"):
+        n_missing = int(df[col_str].isna().sum())
+        if n_missing:
+            _fail(f"kolom {col_str} punya {n_missing} missing value — astype(str) akan membuat kategori 'nan' palsu")
 
     df["d_jenis_kelamin"] = df["JK"].astype(str)
     df["d_umur"] = df["Umur"].astype(int)
@@ -267,12 +275,13 @@ def run() -> tuple[pd.DataFrame, dict]:
 
 def main() -> None:
     df, qa = run()
+    # Fix R3-7: assert SEBELUM menulis artefak — file invalid tidak boleh sempat tersimpan.
+    assert len(df) == 306, f"jumlah baris berubah: {len(df)} (harus 306)"
+    assert not df.isna().any().any(), "masih ada missing value setelah cleaning"
     C.DATA_CLEAN.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(C.DATA_CLEAN, index=False)
     _write_qa_report(qa, C.DATA_CLEAN.parent / "qa_report.md")
     print(f"[01_clean] ditulis: {C.DATA_CLEAN}  shape={df.shape}")
-    assert len(df) == 306, f"jumlah baris berubah: {len(df)} (harus 306)"
-    assert not df.isna().any().any(), "masih ada missing value setelah cleaning"
 
 
 if __name__ == "__main__":

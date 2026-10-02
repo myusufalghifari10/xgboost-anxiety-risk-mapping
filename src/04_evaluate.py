@@ -27,7 +27,7 @@ from sklearn.metrics import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as cfg  # noqa: E402
 
-OOF_PATH = cfg.ROOT / "outputs" / "oof_predictions.csv"
+OOF_PATH = cfg.OOF_CSV  # fix R3-6: satu sumber kebenaran path dari config
 BOOTSTRAP_N = 2000
 BOOTSTRAP_SEED = cfg.RANDOM_SEED
 
@@ -118,6 +118,9 @@ def main() -> None:
     assert len(oof) == n_siswa * n_repeat, (
         f"Jumlah baris OOF {len(oof)} harus = siswa ({n_siswa}) x ulangan ({n_repeat})."
     )
+    # Fix R3-8: defensif — pasangan (row_id, repeat) harus unik (1 prediksi per siswa per ulangan).
+    assert not oof.duplicated(["row_id", "repeat"]).any(), \
+        "ada pasangan (row_id, repeat) terduplikasi di OOF — fold/ulangan tidak konsisten"
     assert y.min() >= cfg.ANXIETY_VALID_RANGE[0] and y.max() <= cfg.ANXIETY_VALID_RANGE[1], \
         f"y_kontinu di luar rentang {cfg.ANXIETY_VALID_RANGE}"
     assert 0.0 <= pb.min() and pb.max() <= 1.0, "probabilitas biner harus di rentang 0-1"
