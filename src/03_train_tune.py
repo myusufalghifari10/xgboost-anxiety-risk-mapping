@@ -22,6 +22,12 @@ Artefak:
     outputs/preprocessor.joblib   (encoder kategorikal ter-fit di seluruh data)
     outputs/best_params.json      (kunci kontrak: best_params, best_params_raw,
                                    feature_columns + jejak tambahan)
+    outputs/checkpoints/          (status RESUME: progres.json, ronde_*.json,
+                                   optuna_final.db — bukan deliverable)
+
+CHECKPOINT/RESUME: tiap ronde outer-CV disimpan begitu selesai; tuning final
+memakai SQLite. Proses terputus? Jalankan ulang perintah yang sama — yang sudah
+selesai dilewati, hanya sisa yang dijalankan. --fresh menghapus semua checkpoint.
 
 CATATAN: skrip ini menjalankan training — urutan eksekusi pipeline:
 01 -> 02 -> 03 (skrip ini) -> 04 -> 05 -> 06.
@@ -29,7 +35,9 @@ CATATAN: skrip ini menjalankan training — urutan eksekusi pipeline:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -56,6 +64,7 @@ MODEL_CLF_PATH = cfg.MODEL_CLF_PATH
 PREPROCESSOR_PATH = cfg.PREPROCESSOR_PATH
 BEST_PARAMS_JSON = cfg.BEST_PARAMS_JSON
 PER_FOLD_CSV = cfg.PER_FOLD_TUNING_CSV
+CKPT_DIR = cfg.CHECKPOINT_DIR  # checkpoint/resume (status antara, bukan deliverable)
 
 BASE_XGB = cfg.BASE_XGB  # fix C4: satu sumber di config (dulu duplikat di 03 dan 05)
 
@@ -131,20 +140,12 @@ def fit_score(params: dict, X_tr, y_tr, X_va, y_va) -> float:
     return float(mean_squared_error(y_va, model.predict(X_va)) ** 0.5)
 
 
-def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict]]:
-    """Tuning Optuna HANYA pada data train. Kembalikan (params_1se, params_best, trials).
+def _make_objective(X, y, inner: KFold):
+    """Objective Optuna: RMSE inner-CV dengan pruning median.
 
-    Pruning Median: objective melaporkan rata-rata running RMSE tiap inner fold;
-    trial yang jauh lebih buruk dari median trial sebelumnya dibuang lebih awal.
+    Dipakai tune_on_train (per ronde outer) DAN tuning_final (model akhir)
+    supaya kedua jalur tuning tidak mungkin menyimpang satu sama lain.
     """
-    inner = KFold(n_splits=cfg.INNER_FOLDS, shuffle=True, random_state=seed)
-    study = optuna.create_study(
-        direction="minimize",
-        sampler=TPESampler(seed=seed),  # seed sampler dari config
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),  # fix F4: sebelumnya Nopruner (docstring bohong)
-    )
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
     def objective(trial: optuna.Trial) -> float:
         params = suggest_params(trial)
         scores = []
@@ -158,17 +159,21 @@ def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict
         trial.set_user_attr("fold_scores", [float(s) for s in scores])
         return float(np.mean(scores))
 
-    study.optimize(objective, n_trials=n_trials, gc_after_trial=True)
+    return objective
 
-    trials = study.trials
-    complete = [t for t in trials if t.state == optuna.trial.TrialState.COMPLETE]
+
+def _pilih_1se(study: optuna.Study) -> tuple[dict, dict]:
+    """Pilih (params_1se, params_best) dari study: aturan 1-SE + simplicity_key.
+
+    1-SE: ambang = rmse terbaik + 1 standard error BENAR dari fold-fold trial terbaik.
+    Fix blocker rev-model #2: SE dari daftar skor per-fold yang tersimpan,
+    bukan dari running mean kumulatif (yang membuat ambang terlalu sempit).
+    """
+    complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if not complete:
         raise RuntimeError("Tidak ada trial Optuna yang selesai; periksa ruang pencarian.")
 
     best = min(complete, key=lambda t: t.value)
-    # 1-SE: ambang = rmse terbaik + 1 standard error BENAR dari fold-fold trial terbaik.
-    # Fix blocker rev-model #2: SE dari daftar skor per-fold yang tersimpan,
-    # bukan dari running mean kumulatif (yang membuat ambang terlalu sempit).
     best_folds = trial_fold_scores(best)
     # Fix B1: jangan diam-diam jatuh ke argmin saat daftar skor per-fold hilang/incomplete.
     if len(best_folds) != cfg.INNER_FOLDS:
@@ -180,7 +185,25 @@ def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict
     threshold = best.value + inner_se
     within = [t for t in complete if t.value <= threshold]
     chosen = min(within, key=lambda t: simplicity_key(t.params))
-    return dict(chosen.params), dict(best.params), [trial_record(t) for t in trials]
+    return dict(chosen.params), dict(best.params)
+
+
+def tune_on_train(X, y, seed: int, n_trials: int) -> tuple[dict, dict, list[dict]]:
+    """Tuning Optuna HANYA pada data train. Kembalikan (params_1se, params_best, trials).
+
+    Pruning Median: objective melaporkan rata-rata running RMSE tiap inner fold;
+    trial yang jauh lebih buruk dari median trial sebelumnya dibuang lebih awal.
+    """
+    inner = KFold(n_splits=cfg.INNER_FOLDS, shuffle=True, random_state=seed)
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=TPESampler(seed=seed),  # seed sampler dari config
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),  # fix F4: sebelumnya Nopruner (docstring bohong)
+    )
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(_make_objective(X, y, inner), n_trials=n_trials, gc_after_trial=True)
+    params_1se, params_best = _pilih_1se(study)
+    return params_1se, params_best, [trial_record(t) for t in study.trials]
 
 
 def trial_fold_scores(trial: optuna.Trial) -> list[float]:
@@ -262,6 +285,40 @@ def _best_complete_rmse(trials: list[dict]) -> float:
     return float(min(nilai))
 
 
+# ---------------------------------------------------------------- checkpoint / resume
+def _fingerprint(n_trials: int, n_trials_final: int, repeats: int, folds: int) -> dict:
+    """Identitas run: resume hanya sah untuk konfigurasi + data yang sama persis."""
+    data_hash = hashlib.sha256(cfg.FEATURES.read_bytes()).hexdigest()[:16]
+    return {
+        "n_trials": int(n_trials), "n_trials_final": int(n_trials_final),
+        "repeats": int(repeats), "folds": int(folds),
+        "seed": cfg.RANDOM_SEED, "n_fitur": len(cfg.FEATURE_COLS), "data_sha256_16": data_hash,
+    }
+
+
+def _checkpoint_path(rep: int, fold: int) -> Path:
+    return CKPT_DIR / f"ronde_r{rep}_f{fold}.json"
+
+
+def _simpan_checkpoint(rep: int, fold: int, oof_round: list[dict], trials: list[dict],
+                       meta: dict, fp: dict) -> None:
+    """Simpan hasil SATU ronde outer-CV secara atomik (tmp + os.replace).
+
+    Ronde tanpa checkpoint = belum selesai -> akan diulang penuh saat resume.
+    """
+    path = _checkpoint_path(rep, fold)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(
+            {"fingerprint": fp, "oof": oof_round, "trials": trials, "meta": meta},
+            # Safety net: numpy scalar (np.int64/np.float64) -> Python scalar.
+            default=lambda o: o.item() if hasattr(o, "item") else str(o),
+        ),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------- nested CV
 def scale_pos_weight(y_bin: np.ndarray, konteks: str) -> float:
     """Bobot kelas untuk data biner timpang, dihitung dari data latih yang diberikan.
@@ -287,8 +344,13 @@ def scale_pos_weight(y_bin: np.ndarray, konteks: str) -> float:
     return neg / pos
 
 
-def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tuple[pd.DataFrame, list[dict], list[dict]]:
+def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int, fp: dict) -> tuple[pd.DataFrame, list[dict], list[dict]]:
     """Outer loop 5-fold x N ulangan. Test fold tidak pernah masuk tuning.
+
+    RESUME: tiap ronde yang selesai langsung disimpan ke outputs/checkpoints/.
+    Bila proses terputus, jalankan ulang perintah yang sama — ronde yang sudah
+    ber-checkpoint dilewati. Ronde saling independen (seed deterministik per
+    ronde), sehingga resume menghasilkan angka IDENTIK dengan run penuh.
 
     Mengembalikan (oof_predictions, per_fold_info, trial_log).
     """
@@ -302,9 +364,42 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tupl
     trial_offset = 0
     trial_log: list[dict] = []
 
+    # Resume hanya sah untuk fingerprint yang sama (konfigurasi + data identik).
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    marker = CKPT_DIR / "progres.json"
+    resume = False
+    if marker.exists():
+        try:
+            fp_lama = json.loads(marker.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            fp_lama = None
+        if fp_lama == fp:
+            resume = True
+            print("[nested_cv] checkpoint ditemukan — melanjutkan ronde yang belum selesai.", flush=True)
+        else:
+            for p in sorted(CKPT_DIR.glob("ronde_*.json")):
+                p.unlink()
+            print("[nested_cv] konfigurasi/data berbeda dari checkpoint lama — memulai dari nol.", flush=True)
+    marker.write_text(json.dumps(fp, sort_keys=True), encoding="utf-8")
+
     for rep in range(repeats):
         outer = KFold(n_splits=folds, shuffle=True, random_state=cfg.RANDOM_SEED + rep)
         for fold, (tr, va) in enumerate(outer.split(X_raw)):
+            cpath = _checkpoint_path(rep, fold)
+            if resume and cpath.exists():
+                isi = json.loads(cpath.read_text(encoding="utf-8"))
+                assert isi["fingerprint"] == fp, f"checkpoint {cpath.name} tidak cocok fingerprint"
+                oof_rows.extend(isi["oof"])
+                per_fold.append(isi["meta"])
+                trial_log.extend(isi["trials"])
+                trial_offset += len(isi["trials"])
+                print(
+                    f"[nested_cv] rep {rep + 1}/{repeats} fold {fold + 1}/{folds} "
+                    "dilewati (checkpoint)",
+                    flush=True,
+                )
+                continue
+
             t0 = time.time()
             seed = cfg.RANDOM_SEED + 1000 * rep + fold
 
@@ -333,16 +428,18 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tupl
             pred_bin = clf.predict_proba(X_va)[:, 1]
             fold_rmse = float(mean_squared_error(y_cont[va], pred_cont) ** 0.5)
 
+            oof_round: list[dict] = []
             for i, idx in enumerate(va):
-                oof_rows.append({
-                    "row_id": row_ids[idx],
+                oof_round.append({
+                    "row_id": int(row_ids[idx]),
                     "repeat": rep,
                     "fold": fold,
-                    "y_kontinu": y_cont[idx],
+                    "y_kontinu": float(y_cont[idx]),
                     "pred_kontinu": float(pred_cont[i]),
                     "y_biner": int(y_bin[idx]),
                     "pred_proba_biner": float(pred_bin[i]),
                 })
+            oof_rows.extend(oof_round)
             per_fold.append({
                 "repeat": rep, "fold": fold,
                 "n_train": int(len(tr)), "n_test": int(len(va)),
@@ -356,8 +453,42 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tupl
                 f"test_rmse={fold_rmse:.4f} ({per_fold[-1]['duration_sec']}s)",
                 flush=True,
             )
+            _simpan_checkpoint(rep, fold, oof_round, trials, per_fold[-1], fp)
 
     return pd.DataFrame(oof_rows), per_fold, trial_log
+
+
+def tuning_final(X, y, n_trials_final: int, fp: dict) -> tuple[dict, dict]:
+    """Tuning model akhir di seluruh data dengan RESUME (SQLite).
+
+    Trial tersimpan di cfg.OPTUNA_FINAL_DB; bila proses terputus, jalankan ulang
+    perintah yang sama — trial yang sudah selesai dipertahankan dan hanya sisa
+    trial yang dijalankan. Study name memuat digest fingerprint sehingga
+    konfigurasi/data yang berbeda tidak pernah mencampur trial lama.
+    Catatan jujur: stream sampling TPE setelah resume bisa berbeda tipis dari run
+    penuh tak terputus (RNG sampler tidak di-bridge); run penuh tetap golden
+    reference untuk reproduksi paper.
+    """
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    inner = KFold(n_splits=cfg.INNER_FOLDS, shuffle=True, random_state=cfg.RANDOM_SEED)
+    digest = hashlib.sha256(json.dumps(fp, sort_keys=True).encode()).hexdigest()[:12]
+    study = optuna.create_study(
+        study_name=f"final_{digest}",
+        storage=f"sqlite:///{cfg.OPTUNA_FINAL_DB}",
+        direction="minimize",
+        sampler=TPESampler(seed=cfg.RANDOM_SEED),
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),
+        load_if_exists=True,
+    )
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    sudah = len(study.trials)
+    sisa = int(n_trials_final) - sudah
+    if sisa > 0:
+        print(f"[tuning_final] {sudah}/{n_trials_final} trial tersimpan — menjalankan {sisa} sisa.", flush=True)
+        study.optimize(_make_objective(X, y, inner), n_trials=sisa, gc_after_trial=True)
+    else:
+        print(f"[tuning_final] {sudah} trial sudah tersimpan — tidak ada yang perlu dijalankan.", flush=True)
+    return _pilih_1se(study)
 
 
 # ---------------------------------------------------------------- final model
@@ -395,6 +526,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="Trial Optuna untuk tuning model final di seluruh data.")
     ap.add_argument("--repeats", type=int, default=cfg.OUTER_REPEATS, help="Ulangan outer CV.")
     ap.add_argument("--folds", type=int, default=cfg.OUTER_FOLDS, help="Lipatan outer CV.")
+    ap.add_argument("--fresh", action="store_true",
+                    help="Abaikan dan hapus checkpoint lama; mulai dari nol.")
     args = ap.parse_args(argv)
 
     assert len(cfg.FEATURE_COLS) == 18, f"Fitur harus 18, dapat {len(cfg.FEATURE_COLS)}"
@@ -405,16 +538,25 @@ def main(argv: list[str] | None = None) -> None:
         f"y_kontinu di luar rentang {cfg.ANXIETY_VALID_RANGE}"
     assert set(df[cfg.TARGET_BIN].unique()) <= {0, 1}, "y_biner harus 0/1"
 
+    # Checkpoint/resume: fingerprint menentukan apakah checkpoint lama masih sah.
+    fp = _fingerprint(args.n_trials, args.n_trials_final, args.repeats, args.folds)
+    if args.fresh:
+        for p in sorted(CKPT_DIR.glob("ronde_*.json")):
+            p.unlink()
+        (CKPT_DIR / "progres.json").unlink(missing_ok=True)
+        cfg.OPTUNA_FINAL_DB.unlink(missing_ok=True)
+        print("[main] --fresh: checkpoint lama dibuang.", flush=True)
+
     # Angka resmi lebih dulu (nested CV), lalu tuning di data penuh untuk model final.
     # Fix D2a: oof/trials/per_fold TIDAK ditulis di sini — semua artefak data ditulis
     # di akhir setelah best_params.json sukses (satu titik komit), supaya run terputus
     # (mis. di tengah tuning final berjam-jam) tidak meninggalkan artefak generasi baru;
     # 06_report menolak campur generasi (guard D2b).
-    oof, per_fold, trials = nested_cv(df, args.n_trials, args.repeats, args.folds)
+    oof, per_fold, trials = nested_cv(df, args.n_trials, args.repeats, args.folds, fp)
 
     pre = build_preprocessor(df)
     X_full = pre.fit_transform(df[cfg.FEATURE_COLS])
-    params_1se, params_best, _ = tune_on_train(X_full, y, cfg.RANDOM_SEED, args.n_trials_final)
+    params_1se, params_best = tuning_final(X_full, y, args.n_trials_final, fp)
     feature_columns = train_final(df, params_1se)
     BEST_PARAMS_JSON.write_text(json.dumps({
         # Kunci WAJIB kontrak (dipakai 05_explain.py & 06_report.py):

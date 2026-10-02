@@ -34,6 +34,11 @@ TABEL_FAKTOR = TABLE_DIR / "tabel_faktor.csv"
 RISK_MAP_JURUSAN = TABLE_DIR / "risk_map_jurusan.csv"
 RISK_MAP_JENISKELAMIN = TABLE_DIR / "risk_map_jeniskelamin.csv"
 
+# Checkpoint / resume 03_train_tune.py — status antara (ronde CV + tuning final),
+# bukan deliverable; 04/05/06 tidak pernah membaca isi direktori ini.
+CHECKPOINT_DIR = ROOT / "outputs" / "checkpoints"
+OPTUNA_FINAL_DB = CHECKPOINT_DIR / "optuna_final.db"
+
 # ---------- Reproducibility ----------
 RANDOM_SEED = 42
 # Parameter dasar XGBoost dipakai 03_train_tune.py DAN 05_explain.py — satu sumber
