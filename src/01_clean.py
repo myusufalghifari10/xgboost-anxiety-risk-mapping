@@ -84,10 +84,10 @@ def _fix_out_of_range(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
 def _merge_split_anxiety_items(df: pd.DataFrame, qa: dict) -> pd.DataFrame:
     """Gabungkan item kecemasan yang kalimatnya terbelah jadi 2 kolom (13+14, 19+20).
 
-    Pada data ini semua baris jatuh ke satu nilai valid karena kolom pasangannya artefak
-    isian (nilai 0 di luar skala), tapi aturannya dibuat umum: per baris dipakai rata-rata
-    nilai yang berada di dalam rentang sah; bila tidak ada satu pun, hasilnya NaN
-    (diimputasi median).
+    Pada data ini semua baris jatuh ke tepat satu nilai valid karena kolom pasangannya artefak
+    isian (nilai 0 di luar skala). Aturan per baris: bila KEDUA kolom valid -> fail-fast
+    (dua jawaban berbeda tidak boleh diramu senyap, fix C2); bila tepat satu valid ->
+    pakai nilai itu; bila tidak ada satu pun -> NaN (diimputasi median).
     """
     df = df.copy()
     lo, hi = C.ANXIETY_VALID_RANGE

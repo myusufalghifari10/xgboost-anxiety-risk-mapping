@@ -621,7 +621,7 @@ def drop_hb_test(
         "rmse_lengkap_mean": float(np.mean(rmse_full)),
         "rmse_tanpa_hb_mean": float(np.mean(rmse_tanpa)),
         "selisih_rmse_mean": float(diff.mean()),
-        "selisih_rmse_std": float(diff.std()),
+        "selisih_rmse_std": float(diff.std(ddof=1)),  # Fix D3c: SD sampel (ddof=1), dikutip laporan
         "proporsi_fold_hb_membantu": float(np.mean(diff > 0)),
         "n_folds": int(len(diff)),
         "cara_baca": (

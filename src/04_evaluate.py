@@ -119,6 +119,10 @@ def main() -> None:
     assert len(oof) == n_siswa * n_repeat, (
         f"Jumlah baris OOF {len(oof)} harus = siswa ({n_siswa}) x ulangan ({n_repeat})."
     )
+    # Fix D3b: run dengan jumlah ulangan salah (mis. 9) harus gagal, bukan senyap.
+    assert n_repeat == cfg.OUTER_REPEATS, (
+        f"OOF memakai {n_repeat} ulangan, config OUTER_REPEATS = {cfg.OUTER_REPEATS}."
+    )
     # Fix R3-8: defensif — pasangan (row_id, repeat) harus unik (1 prediksi per siswa per ulangan).
     assert not oof.duplicated(["row_id", "repeat"]).any(), \
         "ada pasangan (row_id, repeat) terduplikasi di OOF — fold/ulangan tidak konsisten"
@@ -129,6 +133,17 @@ def main() -> None:
     assert oof_ids == features_ids, (
         "row_id OOF tidak sama dengan features.parquet; "
         f"hilang: {sorted(features_ids - oof_ids)[:5]} (total {len(features_ids - oof_ids)})"
+    )
+    # Fix D3b: label target per row_id harus identik dengan features.parquet —
+    # antisipasi 02 dijalankan ulang setelah 03 (metrik bisa memakai label lama).
+    fit = pd.read_parquet(cfg.FEATURES, columns=["row_id", cfg.TARGET_CONT])
+    ref = oof["row_id"].astype(int).map(
+        dict(zip(fit["row_id"].astype(int), fit[cfg.TARGET_CONT].astype(float)))
+    )
+    assert ref.notna().all(), "row_id OOF tidak ada di features.parquet (y_kontinu)"
+    assert np.allclose(y, ref.to_numpy(dtype=float), rtol=1e-9, atol=1e-9), (
+        "y_kontinu OOF != features.parquet per row_id — 02 dijalankan ulang setelah 03; "
+        "jalankan ulang 03-06 secara lengkap."
     )
     assert y.min() >= cfg.ANXIETY_VALID_RANGE[0] and y.max() <= cfg.ANXIETY_VALID_RANGE[1], \
         f"y_kontinu di luar rentang {cfg.ANXIETY_VALID_RANGE}"

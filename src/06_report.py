@@ -50,16 +50,65 @@ def load_metrics() -> Dict:
 
 
 def _assert_metrics_complete(metrics: Dict) -> None:
-    """Fail-fast kontrak metrics.json (fix B3) — laporan tidak boleh berisi 'nan' senyap."""
+    """Fail-fast kontrak metrics.json (fix B3/D3a) — laporan tidak boleh berisi 'nan' senyap."""
     cont = metrics.get("continuous") or {}
     binary = metrics.get("binary") or {}
     kurang = [k for k in C.REPORT_METRICS if k not in cont]
     kurang += [k for k in C.REPORT_METRICS_BIN if k not in binary]
+    # Fix D3a: n_evals/n_prediksi dipakai tulis_laporan tapi sebelumnya tak divalidasi.
+    kurang += [k for k in ("n_evals", "n_prediksi") if k not in cont]
     if kurang:
         raise KeyError(f"metrics.json kurang kunci metrik: {kurang}")
     ci = cont.get("ci95")
     if not isinstance(ci, dict) or not all(k in ci for k in ("rmse", "mae", "r2")):
         raise KeyError(f"metrics.json ci95 tidak lengkap: {ci!r}")
+    # Fix D3a: nilai metrik harus finite — "nan" tidak boleh sampai ter-render.
+    for key in C.REPORT_METRICS:
+        if not np.isfinite(float(cont[key])):
+            raise ValueError(f"metrics.json continuous.{key} = {cont[key]!r} bukan angka finite")
+    for key in C.REPORT_METRICS_BIN:
+        if not np.isfinite(float(binary[key])):
+            raise ValueError(f"metrics.json binary.{key} = {binary[key]!r} bukan angka finite")
+
+
+def _assert_artifacts_same_generation() -> None:
+    """Guard D2b: tolak campur-generasi artefak (run terputus / tahap dilewati).
+
+    Urutan normal: 03 (oof/trials/per_fold/best_params ditulis bersamaan pada satu
+    titik komit) -> 04 (metrics.json) -> 05 (shap/stability/drop_hb) -> 06 (skrip ini).
+    """
+    # (i) artefak 03 harus ditulis bersamaan: rentang mtime maksimal 600 detik.
+    path_03 = {
+        "oof_predictions.csv": require(C.OOF_CSV, "03_train_tune.py"),
+        "optuna_trials.csv": require(C.TRIALS_CSV, "03_train_tune.py"),
+        "per_fold_tuning.csv": require(C.PER_FOLD_TUNING_CSV, "03_train_tune.py"),
+        "best_params.json": require(C.BEST_PARAMS_JSON, "03_train_tune.py"),
+    }
+    mtime = {nama: p.stat().st_mtime for nama, p in path_03.items()}
+    rentang = max(mtime.values()) - min(mtime.values())
+    if rentang > 600:
+        lama = min(mtime, key=mtime.get)
+        baru = max(mtime, key=mtime.get)
+        raise RuntimeError(
+            "artefak campur generasi — jalankan ulang 03-05 secara lengkap "
+            f"(rentang mtime artefak 03 = {rentang:.0f} dtk > 600 dtk: "
+            f"{lama} vs {baru})."
+        )
+    # (ii) output 04/05 tidak boleh lebih lama dari best_params.json (toleransi 2 dtk).
+    bawah = mtime["best_params.json"] - 2.0
+    pasca = {
+        "metrics.json": (C.METRICS_JSON, "04_evaluate.py"),
+        "shap_global_ranking.csv": (C.SHAP_GLOBAL_RANKING, "05_explain.py"),
+        "stability_ranking.csv": (C.STABILITY_RANKING, "05_explain.py"),
+        "drop_hb_test.json": (C.DROP_HB_JSON, "05_explain.py"),
+    }
+    for nama, (path, dibuat) in pasca.items():
+        if require(path, dibuat).stat().st_mtime < bawah:
+            raise RuntimeError(
+                "artefak campur generasi — jalankan ulang 03-05 secara lengkap "
+                f"({nama} lebih lama dari best_params.json; tahap 04/05 dilewati "
+                "atau 03 dijalankan ulang tanpa 04/05)."
+            )
 
 
 def load_shap_ranking() -> pd.DataFrame:
@@ -72,9 +121,19 @@ def load_shap_ranking() -> pd.DataFrame:
 
 
 def load_drop_hb() -> Dict:
-    return json.loads(
+    drop = json.loads(
         require(C.DROP_HB_JSON, "05_explain.py").read_text(encoding="utf-8")
     )
+    # Fix D3a: kunci yang dipakai tulis_laporan divalidasi SEBELUM tulis pertama.
+    kurang = [
+        k for k in ("selisih_rmse_mean", "selisih_rmse_std", "proporsi_fold_hb_membantu", "n_folds")
+        if k not in drop
+    ]
+    if kurang:
+        raise KeyError(
+            f"drop_hb_test.json kurang kunci: {kurang} — jalankan ulang 05_explain.py."
+        )
+    return drop
 
 
 def load_stability() -> pd.DataFrame:
@@ -170,7 +229,8 @@ def tabel_performa(metrics: Dict, n_trial: int, n_outer: int) -> pd.DataFrame:
             rows.append({"target": "biner", "metrik": key, "nilai": binary[key]})
     # Fix catatan rev-explain N15: tulis "trial per ronde x jumlah ronde", bukan
     # total baris trials CSV (yang dulu ditulis seolah-olah 250.000 setelan unik).
-    # Fix B9: baris hitungan ditulis int (bukan 500.0) agar tidak salah baca sebagai nilai metrik.
+    # Fix B9/D4c: baris hitungan ditulis sebagai str(int(...)) (bukan "500.0")
+    # agar tidak salah baca sebagai nilai metrik.
     rows.append({"target": "tuning", "metrik": "n_trials_per_ronde", "nilai": str(int(n_trial))})
     rows.append({"target": "tuning", "metrik": "n_ronde_outer", "nilai": str(int(n_outer))})
     return pd.DataFrame(rows)
@@ -253,13 +313,15 @@ def tulis_laporan(
     prevalence = 100 * n_pos / len(df)
     bawah_rmse, atas_rmse = _ci_bounds(cont["ci95"]["rmse"])
 
-    # Fix B9: prosa ambang memakai notasi Indonesia (>= 1,5 dan < 2,5).
-    hijau_s = f"{ZONE_HIJAU_MAX:.1f}".replace(".", ",")
-    kuning_s = f"{ZONE_KUNING_MAX:.1f}".replace(".", ",")
+    # Fix B9/D4b: notasi desimal seragam gaya teknis (titik) -> konsisten dengan RMSE/CI.
+    hijau_s = f"{ZONE_HIJAU_MAX:.1f}"
+    kuning_s = f"{ZONE_KUNING_MAX:.1f}"
 
     # Fix A8: total trial eksplisit dan pemisahan klaim test untuk nested vs model final.
     nested_total = f"{n_trial * n_outer:,}".replace(",", ".")
     final_total = f"{n_trial_final:,}".replace(",", ".")
+    # Fix D4b: pemisah ribuan gaya Indonesia (titik) untuk semua angka teknis.
+    n_trial_indo = f"{n_trial:,}".replace(",", ".")
 
     # Fix B7: tampilkan stabilitas (proporsi_top5) + caveat in-sample pada top-5 SHAP.
     top5 = faktor.head(5)[["fitur", "arah", "mean_abs_shap", "proporsi_top5"]]
@@ -289,8 +351,9 @@ def tulis_laporan(
         )
     else:
         kalimat_hb = (
-            "Selisih tidak dapat dibedakan dari nol (< 1 SD antar fold): tidak ada "
-            "kontribusi pasti pada data ini — jawaban jujur untuk klaim protektif."
+            "Selisih rata-rata lebih kecil daripada sebaran antar fold (< 1 SD): "
+            "tidak ada kesepakatan arah antar fold — tidak ada kontribusi pasti "
+            "pada data ini (deskriptif, bukan uji signifikansi)."
         )
     # Fix A6: label TINGGI kini berakhiran " (n kecil ...)" pada sel kecil -> pakai startswith.
     map_tinggi = map_j[map_j["tingkat_risiko_kelompok"].str.startswith("TINGGI")]
@@ -309,7 +372,7 @@ def tulis_laporan(
 - Skor kecemasan (kontinu): RMSE = **{m[('kontinu','rmse')]:.3f}** (CI95 {bawah_rmse:.3f}–{atas_rmse:.3f}), MAE = {m[('kontinu','mae')]:.3f}, R2 = {m[('kontinu','r2')]:.3f}
 - Kategori cemas tinggi (biner): AUC = **{m[('biner','auc')]:.3f}**
 - Konteks: N = {n_evals} siswa ({n_prediksi} prediksi out-of-fold); kategori cemas tinggi {n_pos} siswa ({prevalence:.1f}%).
-- Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **{n_trial:,} trial per ronde x {n_outer} ronde = {nested_total} trial**.
+- Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **{n_trial_indo} trial per ronde x {n_outer} ronde = {nested_total} trial**.
 - Tuning model final terpisah: **{final_total} trial** pada seluruh 306 siswa (tidak ada angka test yang dikutip dari model final).
 
 ## 5 faktor paling berpengaruh (SHAP)
@@ -331,7 +394,7 @@ def tulis_laporan(
 - Ambang zona: hijau < {hijau_s}; kuning >= {hijau_s} dan < {kuning_s}; merah >= {kuning_s} (skala 1-4, mengikuti ambang kategori tinggi di config).
 - Skor risiko per siswa memakai prediksi out-of-fold (bukan prediksi in-sample), sehingga proporsi zona merah tidak terinflasi oleh data latih.
 - Probabilitas biner berasal dari model dengan `scale_pos_weight` (target timpang): probabilitas BELUM terkalibrasi terhadap prevalensi asli sehingga tidak boleh dibaca sebagai risiko absolut per siswa.
-- `balanced_accuracy` dihitung pada ambang tetap 0,5 (bukan ambang optimal), sedangkan AUC tetap sahih karena hanya bergantung urutan peringkat.
+- `balanced_accuracy` dihitung pada ambang tetap 0.5 (bukan ambang optimal), sedangkan AUC tetap sahih karena hanya bergantung urutan peringkat.
 - Menggunakan bahasa asosiatif: data cross-sectional, korelasi bukan sebab-akibat.
 """
     C.TABLE_DIR.mkdir(parents=True, exist_ok=True)
@@ -349,6 +412,8 @@ def run_all() -> None:
     assert zona_skor(C.ZONE_KUNING_MAX) == "merah", "batas bawah zona merah"
     assert zona_skor(C.ZONE_HIJAU_MAX) == "kuning", "batas bawah zona kuning"
     assert zona_skor(C.ZONE_HIJAU_MAX - 1e-9) == "hijau", "batas bawah zona hijau"
+    # Fix D2b: sebelum membaca/menulis apa pun, pastikan artefak satu generasi.
+    _assert_artifacts_same_generation()
 
     metrics = load_metrics()
     _assert_metrics_complete(metrics)

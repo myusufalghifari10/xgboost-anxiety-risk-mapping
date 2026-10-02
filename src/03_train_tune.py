@@ -23,7 +23,8 @@ Artefak:
     outputs/best_params.json      (kunci kontrak: best_params, best_params_raw,
                                    feature_columns + jejak tambahan)
 
-CATATAN: skrip ini MELETAKKAN training. Belum boleh dijalankan sampai disetujui.
+CATATAN: skrip ini menjalankan training — urutan eksekusi pipeline:
+01 -> 02 -> 03 (skrip ini) -> 04 -> 05 -> 06.
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ import joblib
 import numpy as np
 import optuna
 import pandas as pd
-from optuna.exceptions import TrialPruned  # optuna 5.x: modul 'optuna.pruning' sudah tidak ada
+from optuna.exceptions import TrialPruned  # TrialPruned selalu diekspor optuna.exceptions (bukan optuna.pruners)
 from optuna.samplers import TPESampler
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import mean_squared_error
@@ -221,19 +222,44 @@ def trial_record(trial: optuna.Trial) -> dict:
 
     Nama kolom 'mean_test_rmse' mengikuti kontrak, tetapi NILAINYA adalah RMSE
     inner-CV pada data train — test fold sengaja belum tersentuh saat tuning.
-    Fix B2: placeholder numerik memakai NaN (bukan string "") agar kolom CSV
-    tetap numerik dan bisa dihitung pembaca.
+    Fix B2/D1: kolom numerik selalu float NaN (bukan string ""). Eksperimen
+    langsung di optuna 5.0 membuktikan trial PRUNED tetap punya
+    ``value = intermediate TERAKHIR`` (rata-rata parsial <5 fold, BUKAN None),
+    jadi mean_test_rmse/std_test_rmse hanya diisi bila state COMPLETE; selain
+    itu NaN. Kolom 'state' hanya dipakai penyaring in-memory (CSV tetap 5 kolom
+    kontrak — kolom state tidak ikut ditulis).
     """
     durasi = getattr(trial, "duration", None)
+    lengkap = trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
     return {
         "trial_number": trial.number,
         "params": json.dumps(trial.params, sort_keys=True),
-        "mean_test_rmse": trial.value if trial.value is not None else np.nan,
+        "state": trial.state.name,
+        "mean_test_rmse": float(trial.value) if lengkap else np.nan,
         "std_test_rmse": (
-            std_of_best_folds(trial) if trial.state == optuna.trial.TrialState.COMPLETE else np.nan
+            std_of_best_folds(trial) if lengkap else np.nan
         ),
         "duration": durasi.total_seconds() if durasi is not None else np.nan,
     }
+
+
+def _best_complete_rmse(trials: list[dict]) -> float:
+    """RMSE inner-CV terbaik dari trial COMPLETE saja (fix D1 + guard D3d).
+
+    Trial PRUNED di optuna 5.0 membawa value = rata-rata parsial fold yang belum
+    lengkap (terverifikasi eksperimen), sehingga penyaring NaN saja tidak cukup —
+    barisnya harus state COMPLETE. Bila tidak ada satu pun trial COMPLETE,
+    gagal dengan pesan jelas (guard D3d), bukan ValueError min() yang telanjang.
+    """
+    nilai = [
+        t["mean_test_rmse"] for t in trials
+        if t["state"] == "COMPLETE" and not pd.isna(t["mean_test_rmse"])
+    ]
+    if not nilai:
+        raise RuntimeError(
+            "Tidak ada trial Optuna COMPLETE pada ronde ini — inner_best_rmse tidak bisa dihitung."
+        )
+    return float(min(nilai))
 
 
 # ---------------------------------------------------------------- nested CV
@@ -321,9 +347,8 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int) -> tupl
                 "repeat": rep, "fold": fold,
                 "n_train": int(len(tr)), "n_test": int(len(va)),
                 "test_rmse": fold_rmse,
-                "inner_best_rmse": float(min(
-                    t["mean_test_rmse"] for t in trials if not pd.isna(t["mean_test_rmse"])
-                )),
+                # Fix D1: hanya trial COMPLETE (baris PRUNED = NaN, jangan tercampur).
+                "inner_best_rmse": _best_complete_rmse(trials),
                 "duration_sec": round(time.time() - t0, 1),
             })
             print(
@@ -381,10 +406,11 @@ def main(argv: list[str] | None = None) -> None:
     assert set(df[cfg.TARGET_BIN].unique()) <= {0, 1}, "y_biner harus 0/1"
 
     # Angka resmi lebih dulu (nested CV), lalu tuning di data penuh untuk model final.
+    # Fix D2a: oof/trials/per_fold TIDAK ditulis di sini — semua artefak data ditulis
+    # di akhir setelah best_params.json sukses (satu titik komit), supaya run terputus
+    # (mis. di tengah tuning final berjam-jam) tidak meninggalkan artefak generasi baru;
+    # 06_report menolak campur generasi (guard D2b).
     oof, per_fold, trials = nested_cv(df, args.n_trials, args.repeats, args.folds)
-    oof.to_csv(OOF_PATH, index=False)
-    pd.DataFrame(trials, columns=["trial_number", "params", "mean_test_rmse", "std_test_rmse", "duration"]).to_csv(cfg.TRIALS_CSV, index=False)
-    pd.DataFrame(per_fold).to_csv(PER_FOLD_CSV, index=False)
 
     pre = build_preprocessor(df)
     X_full = pre.fit_transform(df[cfg.FEATURE_COLS])
@@ -403,6 +429,11 @@ def main(argv: list[str] | None = None) -> None:
         "n_trials_final": args.n_trials_final,
         "outer": {"folds": args.folds, "repeats": args.repeats},
     }, indent=2), encoding="utf-8")
+
+    # Fix D2a: satu titik komit — tulis artefak data SETELAH best_params.json sukses.
+    oof.to_csv(OOF_PATH, index=False)
+    pd.DataFrame(trials, columns=["trial_number", "params", "mean_test_rmse", "std_test_rmse", "duration"]).to_csv(cfg.TRIALS_CSV, index=False)
+    pd.DataFrame(per_fold).to_csv(PER_FOLD_CSV, index=False)
     print(f"Selesai. Artefak: {cfg.MODEL_PATH}, {OOF_PATH}, {cfg.TRIALS_CSV}, {BEST_PARAMS_JSON}")
 
 

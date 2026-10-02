@@ -171,7 +171,7 @@ def build_codebook(features: pd.DataFrame, path: Path = C.CODEBOOK) -> None:
         "semua item bernegasi lain (KECEMASANSTRESS2/9/16/17/22, MASADEPAN3, COPING16–18) sengaja "
         "TIDAK di-reverse karena tetap searah konstruk/subskalanya (COPING16–18 = subskala "
         "`coping_negatif`, skor tinggi = makin negatif).",
-        "- **Sensitivitas item 12 (nilai 5).** Nilai invalid diisi median kolom (=2); alternatif "
+        "- **Sensitivitas item 12 (nilai 5).** Nilai invalid diisi median kolom; alternatif "
         "isi 4 teruji TIDAK mengubah label `y_biner` siswa mana pun.",
         "",
         "## Asumsi yang Perlu Dikonfirmasi Dosen",

@@ -118,7 +118,7 @@ TINGGAL_LABELS = {
 # ---------- Target ----------
 # y_kontinu = rata-rata 20 item kecemasan valid (1-4)
 # y_biner   = 1 jika y_kontinu >= ambang; ambang ditetapkan di 02_features (codebook)
-ANXIETY_HIGH_THRESHOLD = 2.5  # di atas titik tengah "jarang"(2) dan "sering"(3) (skala 1-4; definisi di codebook)
+ANXIETY_HIGH_THRESHOLD = 2.5  # di atas titik tengah "kadang-kadang"(2) dan "sering"(3) (skala 1-4; definisi di codebook)
 
 # ---------- 18 fitur input (urutan kolom features.parquet) ----------
 NUMERIC_FEATURES = [
