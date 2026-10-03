@@ -114,7 +114,15 @@ def _self_test() -> None:
     assert set(ARMS) == {"c0", "c1", "c2", "c3", "c4"}
     assert _mae(np.array([1.0, 2.0]), np.array([1.5, 2.5])) == 0.5
     assert abs(_rmse(np.array([0.0, 0.0]), np.array([3.0, 4.0])) - 3.5355) < 1e-3
-    print("self-test OK: decode, alpha, arm table, metrik")
+    # uji jalur tuning end-to-end pada data SINTETIS (tanpa data proyek) — menangkap
+    # bug kelas accessor API tak-terimport (mis. optuna.tp) yang lolos py_compile
+    rng = np.random.default_rng(0)
+    xs, ys = rng.normal(size=(40, 6)), rng.normal(size=40) + 2.0
+    best = _tune(xs, ys, n_trials=3, seed=1, arm=ARMS["c1"], w=None)
+    assert isinstance(best, dict) and "max_depth" in best, "_tune gagal pada data sintetis"
+    m = _fit(best, xs, ys, "reg:absoluteerror", np.ones(40))
+    assert _decode(m.predict(xs[:3]), float(ys.mean()), float(ys.min()), float(ys.max()), 0.5).shape == (3,)
+    print("self-test OK: decode, alpha, arm table, metrik, tuning sintetis")
 
 
 # ---------- encoding + tuning ----------
@@ -163,7 +171,7 @@ def _tune(x: np.ndarray, y: np.ndarray, n_trials: int, seed: int, arm: dict, w: 
 
     study = optuna.create_study(
         direction="minimize",
-        sampler=optuna.tp.TPESampler(seed=seed),
+        sampler=optuna.samplers.TPESampler(seed=seed),
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=2),
     )
     study.optimize(objective, n_trials=n_trials, catch=(ValueError,))
@@ -289,7 +297,7 @@ def run_final(arm_name: str, n_trials_final: int) -> None:
                                               hashlib.sha256(FEATURES_EXP2.read_bytes()).hexdigest()[:16])
     study = optuna.create_study(study_name=nama_study, storage=f"sqlite:///{FINAL_DB}",
                                 load_if_exists=True, direction="minimize",
-                                sampler=optuna.tp.TPESampler(seed=seed),
+                                sampler=optuna.samplers.TPESampler(seed=seed),
                                 pruner=optuna.pruners.MedianPruner(n_warmup_steps=2))
     sudah = sum(1 for t in study.trials if t.state.is_finished())
     sisa = max(0, n_trials_final - sudah)
