@@ -24,9 +24,24 @@ outputs/     artefak run terkini — rapi per tahap:
   tables/      tabel & laporan (06)
   figures/     grafik SHAP/PDP
   checkpoints/ status resume 03 (bukan deliverable)
+  exp2/        Eksperimen 2 (fitur 76, ladder C0-C4, model & decoder exp2)
 eksperimen/  arsip per percobaan (lokal saja) — lihat eksperimen/README.md
 docs/        codebook & dokumentasi
 ```
+
+## Eksperimen 2 — MAE-Aligned Item-Level Pipeline
+
+Perbaikan atas baseline (MAE 0,243): **fitur item-level** (58 item mentah → 76 fitur), **objective MAE** (`reg:absoluteerror`, re-tuning penuh), dan **post-processing fold-safe** (clip → shrinkage α terpool → snap grid 0,05 → rata-rata 10 model). Dianalisis lewat ladder arm kumulatif C0–C4 (`src/exp2_train.py`), pemenang dipilih di screening murah, angka final dari outer CV yang tidak dipakai memilih.
+
+```
+.venv/bin/python src/exp2_features.py                       # preprocessing (sekali)
+.venv/bin/python src/exp2_train.py --self-test              # uji fungsi tanpa data
+.venv/bin/python src/exp2_train.py --arm c0 --mode screen   # ulangi c1..c4
+.venv/bin/python src/exp2_train.py --arm <pemenang> --mode full
+.venv/bin/python src/exp2_train.py --arm <pemenang> --mode final
+```
+
+Target MAE realistis: 0,18–0,22 (lantai teoretis ±0,12 dari reliabilitas α=0,89).
 
 ## Status
 
