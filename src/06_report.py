@@ -421,7 +421,7 @@ def tulis_laporan(
 
 ## Ringkasan performa (prediksi out-of-fold, repeated nested CV 5 fold x 10 ulangan)
 - Skor kecemasan (kontinu): RMSE = **{m[('kontinu','rmse')]:.3f}** (CI95 {bawah_rmse:.3f}–{atas_rmse:.3f}), MAE = {m[('kontinu','mae')]:.3f}, R2 = {m[('kontinu','r2')]:.3f}
-- Catatan desain (fix review F2): setiap siswa menjadi data test 10x (sekali per ulangan) dan data latih pada ulangan lain — angka adalah estimasi resampling internal pada {n_evals} siswa yang sama, BUKAN test set eksternal terpisah.
+- Catatan desain: setiap siswa menjadi data test 10x (sekali per ulangan) dan data latih pada ulangan lain — angka adalah estimasi resampling internal pada {n_evals} siswa yang sama, BUKAN test set eksternal terpisah.
 - Kategori cemas tinggi (biner): AUC = **{m[('biner','auc')]:.3f}**
 - Konteks: N = {n_evals} siswa ({n_prediksi} prediksi out-of-fold); kategori cemas tinggi {n_pos} siswa ({prevalence:.1f}%).
 - Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **{n_trial_indo} trial per ronde x {n_outer} ronde = {nested_total} trial**.
