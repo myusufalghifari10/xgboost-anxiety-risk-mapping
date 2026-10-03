@@ -13,10 +13,19 @@ Pemodelan risiko kecemasan remaja dengan **XGBoost + SHAP** — bagian analisis 
 ## Struktur
 
 ```
-src/       kode pipeline (cleaning → fitur → training → evaluasi → SHAP → laporan)
-data/      data mentah (lokal saja, tidak di-push)
-outputs/   dataset bersih, model, figur, tabel
-docs/      codebook & dokumentasi
+src/         kode pipeline (cleaning → fitur → training → evaluasi → SHAP → laporan)
+data/        data mentah (lokal saja, tidak di-push)
+outputs/     artefak run terkini — rapi per tahap:
+  data/        hasil 01-02 (data_clean, features, qa_report)
+  model/       model final + encoder (03)
+  tuning/      jejak Optuna + best_params (03)
+  evaluasi/    metrics + OOF (04)
+  explain/     SHAP, stability, drop-HB (05)
+  tables/      tabel & laporan (06)
+  figures/     grafik SHAP/PDP
+  checkpoints/ status resume 03 (bukan deliverable)
+eksperimen/  arsip per percobaan (lokal saja) — lihat eksperimen/README.md
+docs/        codebook & dokumentasi
 ```
 
 ## Status
