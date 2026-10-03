@@ -83,6 +83,11 @@ def _assert_artifacts_same_generation() -> None:
         "optuna_trials.csv": require(C.TRIALS_CSV, "03_train_tune.py"),
         "per_fold_tuning.csv": require(C.PER_FOLD_TUNING_CSV, "03_train_tune.py"),
         "best_params.json": require(C.BEST_PARAMS_JSON, "03_train_tune.py"),
+        # Fix review F1: tiga artefak model ikut dijaga (dulu tersembunyi dari guard
+        # sehingga model baru bisa berpasangan dengan metrik/SHAP generasi lama).
+        "model_final.ubj": require(C.MODEL_PATH, "03_train_tune.py"),
+        "model_final_clf.ubj": require(C.MODEL_CLF_PATH, "03_train_tune.py"),
+        "preprocessor.joblib": require(C.PREPROCESSOR_PATH, "03_train_tune.py"),
     }
     mtime = {nama: p.stat().st_mtime for nama, p in path_03.items()}
     rentang = max(mtime.values()) - min(mtime.values())
@@ -93,6 +98,14 @@ def _assert_artifacts_same_generation() -> None:
             "artefak campur generasi — jalankan ulang 03-05 secara lengkap "
             f"(rentang mtime artefak 03 = {rentang:.0f} dtk > 600 dtk: "
             f"{lama} vs {baru})."
+        )
+    # (ibis) Fix review F1: features.parquet tidak boleh lebih baru dari best_params.json —
+    # mencegah 02 dijalankan ulang (mis. ganti ambang) lalu 06 mencampur label baru
+    # dengan model/metrik lama. Arah ini aman: pada run penuh 02 selalu lebih dulu.
+    if require(C.FEATURES, "02_features.py").stat().st_mtime > mtime["best_params.json"] + 2.0:
+        raise RuntimeError(
+            "artefak campur generasi — features.parquet lebih baru dari best_params.json "
+            "(02_features.py dijalankan ulang setelah training? jalankan ulang 03-05)."
         )
     # (ii) output 04/05 tidak boleh lebih lama dari best_params.json (toleransi 2 dtk).
     bawah = mtime["best_params.json"] - 2.0
@@ -324,17 +337,35 @@ def tulis_laporan(
     n_trial_indo = f"{n_trial:,}".replace(",", ".")
 
     # Fix B7: tampilkan stabilitas (proporsi_top5) + caveat in-sample pada top-5 SHAP.
+    # Fix review F5: beri penanda stabilitas rendah dan fitur yang tidak dipakai model;
+    # arah dari mean_shap_signed bisa bertentangan dengan bentuk PDP -> arahkan ke grafik.
     top5 = faktor.head(5)[["fitur", "arah", "mean_abs_shap", "proporsi_top5"]]
-    baris_top = "\n".join(
-        f"| {i+1} | {r.fitur} | {r.arah.replace('_', ' ')} | {r.mean_abs_shap:.4f} | {r.proporsi_top5:.0%} |"
-        for i, r in enumerate(top5.itertuples())
+
+    def _baris_top(i: int, r) -> str:
+        if float(r.mean_abs_shap) == 0.0:
+            arah_s, stab_s = "tidak dipakai model", "—"
+        else:
+            arah_s = r.arah.replace("_", " ")
+            stab_s = f"{r.proporsi_top5:.0%}" + (" ⚠ kurang stabil" if r.proporsi_top5 < 0.6 else "")
+        return f"| {i+1} | {r.fitur} | {arah_s} | {r.mean_abs_shap:.4f} | {stab_s} |"
+
+    baris_top = "\n".join(_baris_top(i, r) for i, r in enumerate(top5.itertuples()))
+    fitur_nol = faktor.loc[faktor["mean_abs_shap"] == 0, "fitur"].tolist()
+    baris_nol = (
+        f"- Fitur yang TIDAK dipakai model sama sekali (|SHAP| = 0): {', '.join(fitur_nol)}"
+        if fitur_nol else ""
     )
     # Fix F5: label 'arah' = kontribusi rata-rata pada sampel ini, BUKAN arah efek/kausal.
     catatan_arah = (
         "_Arah = kontribusi rata-rata SHAP pada sampel ini (menaikkan/menurunkan prediksi "
-        "skor kecemasan), bukan uji sebab-akibat. Peringkat SHAP dihitung pada model final "
+        "skor kecemasan), bukan uji sebab-akibat, dan nilainya mendekati nol secara "
+        "matematis — untuk arah hubungan gunakan grafik PDP (outputs/figures/pdp_*.png), "
+        "bukan kolom ini (bisa bertentangan). Peringkat SHAP dihitung pada model final "
         "(in-sample); angka performa di atas berasal dari prediksi out-of-fold._"
     )
+    if baris_nol:
+        catatan_arah = catatan_arah + "\n" + baris_nol + " — nol berarti fitur tidak pernah " \
+            "dipakai model untuk membelah (49 simpul split), BUKAN terbukti tidak berpengaruh."
     # Fix A7: klaim drop-HB dibandingkan dengan 1 SD antar fold, bukan hanya tanda rata-rata.
     selisih = float(drop["selisih_rmse_mean"])
     sd_selisih = float(drop["selisih_rmse_std"])
@@ -357,26 +388,47 @@ def tulis_laporan(
         )
     # Fix A6: label TINGGI kini berakhiran " (n kecil ...)" pada sel kecil -> pakai startswith.
     map_tinggi = map_j[map_j["tingkat_risiko_kelompok"].str.startswith("TINGGI")]
-    baris_map = (
+    # Fix review F4: selalu tampilkan top-3 sel + ambangnya (bukan hanya yang TINGGI),
+    # supaya "tidak ada yang tinggi" tetap bisa diinterpretasi pembaca.
+    ambang_tinggi = f"{C.GROUP_RISK_HIGH:.0%}"
+    baris_tinggi = (
         "\n".join(
             f"- {r.d_jurusan} / {r.d_jenis_kelamin}: {r.proporsi_merah:.0%} siswa zona merah "
             f"(n={r.n_siswa}) — {r.tingkat_risiko_kelompok}"
             for r in map_tinggi.head(5).itertuples()
         )
-        or "- Tidak ada kelompok dengan proporsi zona merah tinggi."
+        or f"- Tidak ada sel yang mencapai ambang TINGGI (proporsi zona merah >= {ambang_tinggi})."
+    )
+    baris_top3 = "\n".join(
+        f"- {r.d_jurusan} / {r.d_jenis_kelamin}: {r.proporsi_merah:.0%} siswa zona merah (n={r.n_siswa})"
+        for r in map_j.head(3).itertuples()
+    )
+    baris_map = (
+        f"{baris_tinggi}\n\nTiga sel dengan proporsi zona merah tertinggi "
+        f"(ambang TINGGI = proporsi zona merah >= {ambang_tinggi}):\n{baris_top3}"
+    )
+    # Fix review F3: disclosure ekor-atas — skor = rata-rata 10 prediksi OOF (ensemble).
+    n_merah_total = int(map_j["n_merah"].sum())
+    baris_zona_konteks = (
+        f"- Konteks peta: {n_merah_total} dari {len(df)} siswa ({100 * n_merah_total / len(df):.1f}%) "
+        f"masuk zona merah, sementara prevalensi aktual kategori cemas tinggi {n_pos} siswa "
+        f"({prevalence:.1f}%). Skor per siswa = rata-rata 10 prediksi OOF (ensemble, bukan "
+        "prediksi satu model) sehingga ekor atas agak ter-mampat — peta untuk MEMBANDINGKAN "
+        "kelompok, bukan menghitung jumlah kasus."
     )
 
     isi = f"""# Laporan Ringkas — Model 1: Peta Risiko Kecemasan (XGBoost)
 
-## Ringkasan performa (dari data test yang tidak pernah dipakai training/tuning)
+## Ringkasan performa (prediksi out-of-fold, repeated nested CV 5 fold x 10 ulangan)
 - Skor kecemasan (kontinu): RMSE = **{m[('kontinu','rmse')]:.3f}** (CI95 {bawah_rmse:.3f}–{atas_rmse:.3f}), MAE = {m[('kontinu','mae')]:.3f}, R2 = {m[('kontinu','r2')]:.3f}
+- Catatan desain (fix review F2): setiap siswa menjadi data test 10x (sekali per ulangan) dan data latih pada ulangan lain — angka adalah estimasi resampling internal pada {n_evals} siswa yang sama, BUKAN test set eksternal terpisah.
 - Kategori cemas tinggi (biner): AUC = **{m[('biner','auc')]:.3f}**
 - Konteks: N = {n_evals} siswa ({n_prediksi} prediksi out-of-fold); kategori cemas tinggi {n_pos} siswa ({prevalence:.1f}%).
 - Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **{n_trial_indo} trial per ronde x {n_outer} ronde = {nested_total} trial**.
 - Tuning model final terpisah: **{final_total} trial** pada seluruh 306 siswa (tidak ada angka test yang dikutip dari model final).
 
 ## 5 faktor paling berpengaruh (SHAP)
-| Peringkat | Faktor | Arah | Rata-rata \\|SHAP\\| | Stabil (masuk top-5 antar fold) |
+| Peringkat | Faktor | Arah | Rata-rata \\|SHAP\\| (poin skor) | Stabil (masuk top-5 antar fold) |
 |---|---|---|---|---|
 {baris_top}
 
@@ -385,14 +437,21 @@ def tulis_laporan(
 ## Uji klaim perilaku sehat (drop-HB)
 - Menghapus fitur `f_perilaku_sehat` mengubah RMSE test sebesar **{drop['selisih_rmse_mean']:+.4f}** (rata-rata {drop['n_folds']} fold; SD antar fold = {sd_selisih:.4f}; {proporsi_hb:.0%} fold menunjukkan HB membantu).
 - {kalimat_hb}
+- Interpretasi jujur: model final tidak pernah membelah pada `f_perilaku_sehat` (SHAP identik nol, PDP datar), jadi uji ini konsisten dengan "fitur tidak dipakai"; bukti utamanya ada di SHAP/PDP, sedangkan selisih ≈ 0 juga bisa muncul dari lotre subsampling kolom (`colsample_bytree`) — jangan dijadikan satu-satunya dasar.
+
+## Interaksi antar faktor — TIDAK TERUKUR
+- Sembilan pasang fokus (perilaku sehat x dukungan/tekanan) bernilai 0 karena fitur tidak pernah dipakai model untuk membelah, BUKAN karena interaksi terbukti tidak ada. Pertanyaan interaksi pada PLAN 8.4 tidak bisa dijawab oleh model ini; jawabannya butuh model yang memang memakai fitur tersebut.
 
 ## Kelompok dengan risiko tinggi (zona merah proporsi tinggi)
 {baris_map}
+
+{baris_zona_konteks}
 
 ## Catatan penggunaan
 - Zona merah/kuning/hijau bersifat **agregat per kelompok** untuk policy brief dan triase guru BK; bukan label diagnosis individual.
 - Ambang zona: hijau < {hijau_s}; kuning >= {hijau_s} dan < {kuning_s}; merah >= {kuning_s} (skala 1-4, mengikuti ambang kategori tinggi di config).
 - Skor risiko per siswa memakai prediksi out-of-fold (bukan prediksi in-sample), sehingga proporsi zona merah tidak terinflasi oleh data latih.
+- Brier score memakai konvensi scikit-learn, yaitu rata-rata (p - y)^2 (setengah dari definisi Brier klasik 2 kelas) — jangan dibandingkan langsung dengan literatur yang memakai definisi lain tanpa konversi.
 - Probabilitas biner berasal dari model dengan `scale_pos_weight` (target timpang): probabilitas BELUM terkalibrasi terhadap prevalensi asli sehingga tidak boleh dibaca sebagai risiko absolut per siswa.
 - `balanced_accuracy` dihitung pada ambang tetap 0.5 (bukan ambang optimal), sedangkan AUC tetap sahih karena hanya bergantung urutan peringkat.
 - Menggunakan bahasa asosiatif: data cross-sectional, korelasi bukan sebab-akibat.

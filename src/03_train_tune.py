@@ -287,12 +287,24 @@ def _best_complete_rmse(trials: list[dict]) -> float:
 
 # ---------------------------------------------------------------- checkpoint / resume
 def _fingerprint(n_trials: int, n_trials_final: int, repeats: int, folds: int) -> dict:
-    """Identitas run: resume hanya sah untuk konfigurasi + data yang sama persis."""
+    """Identitas run: resume hanya sah untuk konfigurasi + data yang sama persis.
+
+    Fix review F3: fingerprint juga mengunci NAMA fitur, ruang pencarian, INNER_FOLDS,
+    dan BASE_XGB (bukan hanya jumlah fitur) — mengubah salah satunya membuat checkpoint
+    lama tidak sah. Fix review F4: pemakaian dipisah di main() — fp_cv (tanpa
+    n_trials_final) untuk checkpoint ronde, fp_final untuk study tuning final,
+    sehingga mengubah --n-trials-final tidak menghapus ronde CV yang sudah selesai.
+    """
     data_hash = hashlib.sha256(cfg.FEATURES.read_bytes()).hexdigest()[:16]
+    cfg_hash = hashlib.sha256(json.dumps({
+        "num": cfg.NUMERIC_FEATURES, "cat": cfg.CATEGORICAL_FEATURES,
+        "space": cfg.XGB_SEARCH_SPACE, "inner": cfg.INNER_FOLDS, "base": cfg.BASE_XGB,
+    }, sort_keys=True).encode()).hexdigest()[:16]
     return {
         "n_trials": int(n_trials), "n_trials_final": int(n_trials_final),
         "repeats": int(repeats), "folds": int(folds),
         "seed": cfg.RANDOM_SEED, "n_fitur": len(cfg.FEATURE_COLS), "data_sha256_16": data_hash,
+        "cfg_sha256": cfg_hash,
     }
 
 
@@ -377,7 +389,7 @@ def nested_cv(df: pd.DataFrame, n_trials: int, repeats: int, folds: int, fp: dic
             resume = True
             print("[nested_cv] checkpoint ditemukan — melanjutkan ronde yang belum selesai.", flush=True)
         else:
-            for p in sorted(CKPT_DIR.glob("ronde_*.json")):
+            for p in sorted(CKPT_DIR.glob("ronde_*.json*")):  # + *.json.tmp yatim (fix review F8)
                 p.unlink()
             print("[nested_cv] konfigurasi/data berbeda dari checkpoint lama — memulai dari nol.", flush=True)
     marker.write_text(json.dumps(fp, sort_keys=True), encoding="utf-8")
@@ -481,7 +493,9 @@ def tuning_final(X, y, n_trials_final: int, fp: dict) -> tuple[dict, dict]:
         load_if_exists=True,
     )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    sudah = len(study.trials)
+    # Fix review F1: trial RUNNING yatim (kill -9) tidak pernah dibersihkan otomatis
+    # (heartbeat mati) — hanya hitung yang is_finished(), jangan ikut menghitung hantu.
+    sudah = sum(1 for t in study.trials if t.state.is_finished())
     sisa = int(n_trials_final) - sudah
     if sisa > 0:
         print(f"[tuning_final] {sudah}/{n_trials_final} trial tersimpan — menjalankan {sisa} sisa.", flush=True)
@@ -492,19 +506,18 @@ def tuning_final(X, y, n_trials_final: int, fp: dict) -> tuple[dict, dict]:
 
 
 # ---------------------------------------------------------------- final model
-def train_final(df: pd.DataFrame, params: dict) -> list[str]:
-    """Latih model akhir di seluruh data dan simpan artefak.
+def train_final(df: pd.DataFrame, params: dict):
+    """Latih model akhir di seluruh data. Mengembalikan (nama_kolom, pre, reg, clf).
 
-    Preprocessor di-fit sekali di seluruh data lalu disimpan; nama kolom hasil
-    encoding dikembalikan untuk ditulis ke best_params.json.
+    Fix review F2: penyimpanan TIDAK dilakukan di sini — dipindah ke main() setelah
+    best_params.json ditulis, supaya tiga artefak model tidak pernah tersimpan tanpa
+    best_params.json yang cocok (dulu menjadi lubang di guard generasi 06).
     """
     pre = build_preprocessor(df)
     X = pre.fit_transform(df[cfg.FEATURE_COLS])
-    joblib.dump(pre, PREPROCESSOR_PATH)
 
     reg = XGBRegressor(**params, **BASE_XGB)
     reg.fit(X, df[cfg.TARGET_CONT].to_numpy(dtype=float))
-    reg.save_model(cfg.MODEL_PATH)  # fix F1: save_booster() tidak ada di xgboost 3.x
 
     y_bin_full = df[cfg.TARGET_BIN].to_numpy(dtype=int)
     clf = XGBClassifier(
@@ -514,8 +527,7 @@ def train_final(df: pd.DataFrame, params: dict) -> list[str]:
         **BASE_XGB,
     )
     clf.fit(X, y_bin_full)
-    clf.save_model(MODEL_CLF_PATH)  # fix F1: save_booster() tidak ada di xgboost 3.x
-    return encoded_feature_names(pre)
+    return encoded_feature_names(pre), pre, reg, clf
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -539,9 +551,14 @@ def main(argv: list[str] | None = None) -> None:
     assert set(df[cfg.TARGET_BIN].unique()) <= {0, 1}, "y_biner harus 0/1"
 
     # Checkpoint/resume: fingerprint menentukan apakah checkpoint lama masih sah.
+    # Fix review F4: pisahkan kunci — mengubah --n-trials-final tidak boleh menghapus
+    # ronde CV yang sudah selesai, dan mengubah --n-trials tidak boleh membuang
+    # trial tuning final.
     fp = _fingerprint(args.n_trials, args.n_trials_final, args.repeats, args.folds)
+    fp_cv = {k: v for k, v in fp.items() if k != "n_trials_final"}
+    fp_final = {k: fp[k] for k in ("n_trials_final", "seed", "cfg_sha256", "data_sha256_16")}
     if args.fresh:
-        for p in sorted(CKPT_DIR.glob("ronde_*.json")):
+        for p in sorted(CKPT_DIR.glob("ronde_*.json*")):
             p.unlink()
         (CKPT_DIR / "progres.json").unlink(missing_ok=True)
         cfg.OPTUNA_FINAL_DB.unlink(missing_ok=True)
@@ -552,12 +569,12 @@ def main(argv: list[str] | None = None) -> None:
     # di akhir setelah best_params.json sukses (satu titik komit), supaya run terputus
     # (mis. di tengah tuning final berjam-jam) tidak meninggalkan artefak generasi baru;
     # 06_report menolak campur generasi (guard D2b).
-    oof, per_fold, trials = nested_cv(df, args.n_trials, args.repeats, args.folds, fp)
+    oof, per_fold, trials = nested_cv(df, args.n_trials, args.repeats, args.folds, fp_cv)
 
     pre = build_preprocessor(df)
     X_full = pre.fit_transform(df[cfg.FEATURE_COLS])
-    params_1se, params_best = tuning_final(X_full, y, args.n_trials_final, fp)
-    feature_columns = train_final(df, params_1se)
+    params_1se, params_best = tuning_final(X_full, y, args.n_trials_final, fp_final)
+    feature_columns, pre_final, reg_final, clf_final = train_final(df, params_1se)
     BEST_PARAMS_JSON.write_text(json.dumps({
         # Kunci WAJIB kontrak (dipakai 05_explain.py & 06_report.py):
         "best_params": params_1se,
@@ -571,6 +588,12 @@ def main(argv: list[str] | None = None) -> None:
         "n_trials_final": args.n_trials_final,
         "outer": {"folds": args.folds, "repeats": args.repeats},
     }, indent=2), encoding="utf-8")
+
+    # Fix review F2: simpan model/preprocessor SETELAH best_params.json — ketiganya
+    # kini ikut dijaga guard generasi 06 (dulu tersembunyi dan bisa campur generasi).
+    joblib.dump(pre_final, PREPROCESSOR_PATH)
+    reg_final.save_model(cfg.MODEL_PATH)  # fix F1: save_booster() tidak ada di xgboost 3.x
+    clf_final.save_model(MODEL_CLF_PATH)
 
     # Fix D2a: satu titik komit — tulis artefak data SETELAH best_params.json sukses.
     oof.to_csv(OOF_PATH, index=False)
