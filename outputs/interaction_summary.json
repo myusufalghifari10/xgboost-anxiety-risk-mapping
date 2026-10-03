@@ -1,0 +1,51 @@
+{
+  "pairs": [
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_duk_keluarga",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_duk_teman",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_duk_orang_dekat",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_akademik",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_keluarga",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_sosial",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_ekonomi",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_digital",
+      "mean_abs_interaksi": 0.0
+    },
+    {
+      "fitur_a": "f_perilaku_sehat",
+      "fitur_b": "f_masadepan",
+      "mean_abs_interaksi": 0.0
+    }
+  ],
+  "semua_fokus_tersedia": true,
+  "cara_baca": "Nilai = rata-rata |SHAP interaction| luar diagonal = SETENGAH efek interaksi pasangan (konvensi SHAP membagi simetris; efek penuh = 2x). Diagonal fitur kategorikal bisa != 0 setelah agregasi one-hot (bukan main effect murni)."
+}

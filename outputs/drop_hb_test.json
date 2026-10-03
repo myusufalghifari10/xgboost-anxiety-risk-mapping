@@ -1,0 +1,10 @@
+{
+  "fitur": "f_perilaku_sehat",
+  "rmse_lengkap_mean": 0.31164359411630566,
+  "rmse_tanpa_hb_mean": 0.31330266736989326,
+  "selisih_rmse_mean": 0.0016590732535876245,
+  "selisih_rmse_std": 0.009623411695096678,
+  "proporsi_fold_hb_membantu": 0.56,
+  "n_folds": 50,
+  "cara_baca": "selisih_rmse_mean positif berarti menghapus f_perilaku_sehat memperburuk prediksi, jadi fitur tersebut membantu. Nilai mendekati nol berarti tidak ada kontribusi bermakna pada data ini."
+}
