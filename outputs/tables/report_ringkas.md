@@ -2,7 +2,7 @@
 
 ## Ringkasan performa (prediksi out-of-fold, repeated nested CV 5 fold x 10 ulangan)
 - Skor kecemasan (kontinu): RMSE = **0.317** (CI95 0.288–0.344), MAE = 0.243, R2 = 0.538
-- Catatan desain (fix review F2): setiap siswa menjadi data test 10x (sekali per ulangan) dan data latih pada ulangan lain — angka adalah estimasi resampling internal pada 306 siswa yang sama, BUKAN test set eksternal terpisah.
+- Catatan desain: setiap siswa menjadi data test 10x (sekali per ulangan) dan data latih pada ulangan lain — angka adalah estimasi resampling internal pada 306 siswa yang sama, BUKAN test set eksternal terpisah.
 - Kategori cemas tinggi (biner): AUC = **0.784**
 - Konteks: N = 306 siswa (3060 prediksi out-of-fold); kategori cemas tinggi 43 siswa (14.1%).
 - Hyperparameter Optuna (nested-CV; test fold TIDAK PERNAH dilihat proses ini): **500 trial per ronde x 50 ronde = 25.000 trial**.
