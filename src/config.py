@@ -7,27 +7,35 @@ from pathlib import Path
 # ---------- Paths ----------
 ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW = ROOT / "data" / "raw" / "INPUT DATA  (1).sav"
-DATA_CLEAN = ROOT / "outputs" / "data_clean.parquet"
-FEATURES = ROOT / "outputs" / "features.parquet"
-QA_REPORT = ROOT / "outputs" / "qa_report.md"
-MODEL_PATH = ROOT / "outputs" / "model_final.ubj"
-MODEL_CLF_PATH = ROOT / "outputs" / "model_final_clf.ubj"
-PREPROCESSOR_PATH = ROOT / "outputs" / "preprocessor.joblib"
-OOF_CSV = ROOT / "outputs" / "oof_predictions.csv"
-PER_FOLD_TUNING_CSV = ROOT / "outputs" / "per_fold_tuning.csv"
-BEST_PARAMS_JSON = ROOT / "outputs" / "best_params.json"
-TRIALS_CSV = ROOT / "outputs" / "optuna_trials.csv"
-METRICS_JSON = ROOT / "outputs" / "metrics.json"
+
+# --- Layout outputs/ per tahap (reorganisasi 2026-10-03) — semua path produksi di sini. ---
+OUT_DATA = ROOT / "outputs" / "data"        # 01_clean + 02_features
+OUT_MODEL = ROOT / "outputs" / "model"      # 03: model final + encoder
+OUT_TUNING = ROOT / "outputs" / "tuning"    # 03: jejak tuning Optuna
+OUT_EVAL = ROOT / "outputs" / "evaluasi"    # 04_evaluate
+OUT_EXPLAIN = ROOT / "outputs" / "explain"  # 05_explain
 FIG_DIR = ROOT / "outputs" / "figures"
 TABLE_DIR = ROOT / "outputs" / "tables"
+
+DATA_CLEAN = OUT_DATA / "data_clean.parquet"
+FEATURES = OUT_DATA / "features.parquet"
+QA_REPORT = OUT_DATA / "qa_report.md"
+MODEL_PATH = OUT_MODEL / "model_final.ubj"
+MODEL_CLF_PATH = OUT_MODEL / "model_final_clf.ubj"
+PREPROCESSOR_PATH = OUT_MODEL / "preprocessor.joblib"
+OOF_CSV = OUT_EVAL / "oof_predictions.csv"
+METRICS_JSON = OUT_EVAL / "metrics.json"
+PER_FOLD_TUNING_CSV = OUT_TUNING / "per_fold_tuning.csv"
+BEST_PARAMS_JSON = OUT_TUNING / "best_params.json"
+TRIALS_CSV = OUT_TUNING / "optuna_trials.csv"
 CODEBOOK = ROOT / "docs" / "codebook.md"
 
 # Artefak penjelasan & laporan (konstantas path — jangan hardcode di 05/06)
-SHAP_GLOBAL_RANKING = ROOT / "outputs" / "shap_global_ranking.csv"
-SHAP_LOCAL = ROOT / "outputs" / "shap_local.csv"
-INTERACTION_SUMMARY = ROOT / "outputs" / "interaction_summary.json"
-DROP_HB_JSON = ROOT / "outputs" / "drop_hb_test.json"
-STABILITY_RANKING = ROOT / "outputs" / "stability_ranking.csv"
+SHAP_GLOBAL_RANKING = OUT_EXPLAIN / "shap_global_ranking.csv"
+SHAP_LOCAL = OUT_EXPLAIN / "shap_local.csv"
+INTERACTION_SUMMARY = OUT_EXPLAIN / "interaction_summary.json"
+DROP_HB_JSON = OUT_EXPLAIN / "drop_hb_test.json"
+STABILITY_RANKING = OUT_EXPLAIN / "stability_ranking.csv"
 REPORT_RINGKAS = TABLE_DIR / "report_ringkas.md"
 TABEL_PERFORMA = TABLE_DIR / "tabel_performa.csv"
 TABEL_FAKTOR = TABLE_DIR / "tabel_faktor.csv"
@@ -38,6 +46,10 @@ RISK_MAP_JENISKELAMIN = TABLE_DIR / "risk_map_jeniskelamin.csv"
 # bukan deliverable; 04/05/06 tidak pernah membaca isi direktori ini.
 CHECKPOINT_DIR = ROOT / "outputs" / "checkpoints"
 OPTUNA_FINAL_DB = CHECKPOINT_DIR / "optuna_final.db"
+
+# Pastikan direktori output ada (semua skrip menulis lewat konstanta di atas).
+for _d in (OUT_DATA, OUT_MODEL, OUT_TUNING, OUT_EVAL, OUT_EXPLAIN, FIG_DIR, TABLE_DIR, CHECKPOINT_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 # ---------- Reproducibility ----------
 RANDOM_SEED = 42

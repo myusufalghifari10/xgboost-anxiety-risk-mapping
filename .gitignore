@@ -27,6 +27,9 @@ venv/
 *.db
 .cache/
 
+# Arsip eksperimen (berisi turunan data responden — lokal saja)
+eksperimen/eksperimen-*/
+
 # OS
 .DS_Store
 Thumbs.db

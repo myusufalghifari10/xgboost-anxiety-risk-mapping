@@ -15,12 +15,12 @@ Skema (PLAN bagian 5-6):
     Final: model dilatih ulang di seluruh 306 baris dengan parameter terpilih.
 
 Artefak:
-    outputs/optuna_trials.csv     (kontrak: trial_number, params, mean_test_rmse, std_test_rmse, duration)
-    outputs/oof_predictions.csv   (prediksi out-of-fold per baris/ulangan -> dipakai 04_evaluate)
-    outputs/model_final.ubj       (XGBRegressor akhir)
-    outputs/model_final_clf.ubj   (XGBClassifier akhir, target biner)
-    outputs/preprocessor.joblib   (encoder kategorikal ter-fit di seluruh data)
-    outputs/best_params.json      (kunci kontrak: best_params, best_params_raw,
+    outputs/tuning/optuna_trials.csv   (kontrak: trial_number, params, mean_test_rmse, std_test_rmse, duration)
+    outputs/evaluasi/oof_predictions.csv (prediksi out-of-fold per baris/ulangan -> dipakai 04_evaluate)
+    outputs/model/model_final.ubj      (XGBRegressor akhir)
+    outputs/model/model_final_clf.ubj  (XGBClassifier akhir, target biner)
+    outputs/model/preprocessor.joblib  (encoder kategorikal ter-fit di seluruh data)
+    outputs/tuning/best_params.json    (kunci kontrak: best_params, best_params_raw,
                                    feature_columns + jejak tambahan)
     outputs/checkpoints/          (status RESUME: progres.json, ronde_*.json,
                                    optuna_final.db — bukan deliverable)
