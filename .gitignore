@@ -27,8 +27,10 @@ venv/
 *.db
 .cache/
 
-# Eksperimen 2 (checkpoint JSON berisi baris per-siswa — lokal saja)
+# Eksperimen 2+ (checkpoint JSON & CSV per-siswa — lokal saja)
 outputs/exp2/
+outputs/exp3/
+outputs/exp4/
 
 # Arsip eksperimen (berisi turunan data responden — lokal saja)
 eksperimen/eksperimen-*/
