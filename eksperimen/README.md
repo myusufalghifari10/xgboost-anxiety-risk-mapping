@@ -4,6 +4,14 @@ Folder ini adalah **buku besar eksperimen** Model 1 (dan seterusnya). Setiap per
 yang menghasilkan angka untuk dibandingkan WAJIB diarsipkan di sini sebelum memulai
 percobaan berikutnya.
 
+## Daftar eksperimen
+
+| # | Folder | Inti | Status | MAE ens (ekor) |
+|---|---|---|---|---|
+| 01 | `eksperimen-01-xgboost-baseline-2026-10-03` | XGBoost baseline, 18 fitur agregat, RMSE objective, 30.000 trial | DIPAKAI (baseline) | 0,2366 (0,4293) |
+| 02 | `eksperimen-02-mae-aligned-item-level-2026-10-04` | 76 fitur item-level + objective MAE + post-processing fold-safe | digantikan E3 | 0,2278 (0,4170) |
+| 03 | `eksperimen-03-weighted-loss-warmstart-2026-10-04` | Bobot bin √+cap3 (fold-safe) + warm-start Optuna | **DIPAKAI** | **0,2257 (0,3707)** |
+
 ## Penamaan
 
 ```
