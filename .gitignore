@@ -32,6 +32,9 @@ outputs/exp2/
 outputs/exp3/
 outputs/exp4/
 
+# Checkpoint percobaan-1 (berisi OOF per-siswa — lokal saja, jangan pernah di-push)
+outputs/checkpoints/
+
 # Arsip eksperimen (berisi turunan data responden — lokal saja)
 eksperimen/eksperimen-*/
 
