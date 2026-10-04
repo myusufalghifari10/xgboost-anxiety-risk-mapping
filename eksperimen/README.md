@@ -11,6 +11,7 @@ percobaan berikutnya.
 | 01 | `eksperimen-01-xgboost-baseline-2026-10-03` | XGBoost baseline, 18 fitur agregat, RMSE objective, 30.000 trial | DIPAKAI (baseline) | 0,2366 (0,4293) |
 | 02 | `eksperimen-02-mae-aligned-item-level-2026-10-04` | 76 fitur item-level + objective MAE + post-processing fold-safe | digantikan E3 | 0,2278 (0,4170) |
 | 03 | `eksperimen-03-weighted-loss-warmstart-2026-10-04` | Bobot bin √+cap3 (fold-safe) + warm-start Optuna | **DIPAKAI** | **0,2257 (0,3707)** |
+| 04 | `eksperimen-04-softlabel-eb-taildecode-2026-10-04` | Soft-label empiris-Bayes + decode tanpa-shrink untuk ekor | DITOLAK (ekor +0,050; badan −0,008) | 0,2282 (0,4234) |
 
 ## Penamaan
 
