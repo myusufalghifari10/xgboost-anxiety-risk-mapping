@@ -40,6 +40,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +62,7 @@ MODEL_DIR = MODELS_BASE  # di-set ulang per-fingerprint di main() (temuan review
 #                       ambil booster run lain saat --fingerprint menunjuk run lama)
 TOP_K = 10
 N_BOOT = 500
+AMBANG_ARAH = 0.005  # |PDP-slope| di bawah ini dilaporkan "~0", bukan arah (hindari klaim dari noise)
 
 
 # ---------- fungsi murni (diuji --self-test, tanpa data proyek) ----------
@@ -239,7 +241,12 @@ def _arah_pdp(meta: dict, feats: pd.DataFrame, num_cols: list[str],
     for rep in range(int(meta["repeats"])):
         outer = KFold(int(meta["folds"]), shuffle=True, random_state=C.RANDOM_SEED + rep)
         for fold, (itr, ite) in enumerate(outer.split(feats)):
-            ekor_tr = ekor_all[np.array([int(i) for i in itr])]
+            idx_tr, idx_te = np.array([int(i) for i in itr]), np.array([int(i) for i in ite])
+            mask_tr = np.zeros(len(feats), bool)  # mask panjang PENUH: feats.loc butuh n, bukan n_latih
+            mask_tr[idx_tr] = True
+            ekor_tr = mask_tr & ekor_all
+            assert len(ekor_tr) == len(feats), (
+                f"mask ekor-latih harus sepanjang {len(feats)} (untuk feats.loc), dapat {len(ekor_tr)}")
             if not ekor_tr.any():
                 continue
             q = {}
@@ -249,7 +256,9 @@ def _arah_pdp(meta: dict, feats: pd.DataFrame, num_cols: list[str],
                 if hi > lo:  # fitur konstan di fold ini -> dilewati (tak terdefinisi)
                     q[f] = (lo, hi)
             _, xte = _encode(feats.iloc[itr], feats.iloc[ite], "76")
-            ekor_fold = ekor_all[np.array([int(i) for i in ite])]
+            ekor_fold = ekor_all[idx_te]
+            assert len(ekor_fold) == len(idx_te), (
+                f"mask ekor-uji harus sepanjang {len(idx_te)}, dapat {len(ekor_fold)}")
             if not ekor_fold.any():
                 continue
             b = xgb.Booster()
@@ -307,7 +316,7 @@ fold dari namespace `outputs/exp5/models/{fp}/`). Model: Eksperimen-5
 
 ## Untuk siswa stres (n={n_ekor}), fitur paling berpengaruh
 
-{tiga} — peringkat lengkap: `shap_subgrup.csv`.
+{tiga} — peringkat lengkap: `shap_subgrup_{fp}.csv`.
 
 | # | Fitur | mean\\|SHAP\\| ekor | mean\\|SHAP\\| badan | rank ekor | CI 95% rank | PDP-slope |
 |---|---|---|---|---|---|---|
@@ -332,13 +341,23 @@ fold dari namespace `outputs/exp5/models/{fp}/`). Model: Eksperimen-5
 4. **PDP-slope** = rata-rata perubahan prediksi saat fitur digeser dari persentil 25 ke 75
    (fitur lain tetap) pada siswa ekor, dirata-rata atas {int(meta['repeats']) * int(meta['folds'])} booster; kuantil 25/75 dihitung
    **dari baris latih fold itu** (fold-safe) — hanya untuk fitur numerik/item; fitur
-   kategorikal dilaporkan "-".
+   kategorikal dilaporkan "-". Arah hanya diklaim bila |PDP-slope| >= {AMBANG_ARAH:.3f};
+   di bawah itu dilaporkan "~0" supaya tidak mengklaim arah dari noise.
 5. **Skala penjelasan vs skala metrik**: SHAP menjelaskan output **mentah** booster
    (raw margin), sedangkan MAE dan gerbang pra-registrasi dihitung pada `pred_proc`
    (hasil decode: shrink badan + snap, tanpa shrink di ekor). Untuk siswa ekor keduanya
    koheren (pred_proc = snap(raw) saat raw >= 2,5); untuk siswa badan, skala penjelasan
    tidak sama dengan skala prediksi terdecode — jangan membandingkan magnitudo SHAP
    badan langsung dengan magnitudo error.
+6. **Warp tidak dikoreksi di model ini** (eksperimen-5 DITOLAK: slope pred~y = {vp['nilai']['slope_ensemble']:.3f},
+   tak bergerak dari E3). Karena SHAP **linear** terhadap output model, koreksi de-warp hanya akan
+   **menskalakan** semua nilai SHAP (~1/slope) — **peringkat fitur di atas TIDAK terpengaruh**;
+   yang perlu hati-hati adalah interpretasi **magnitudo absolut** untuk siswa stres (ter-attenuasi
+   sekitar {vp['nilai']['slope_ensemble']:.2f}x). Daftar fitur teratas tetap sah; jangan mengklaim
+   besarnya efek sebesar nilai mentahnya.
+7. **Model sumber penjelasan**: booster E5 (fingerprint `{fp}`) yang DITOLAK gerbang pra-registrasi,
+   namun secara perilaku setara model E3 yang DIPAKAI (korelasi |error| 0,972; MAE ensemble
+   0,2245 vs 0,2257) — booster E3 tidak tersimpan, jadi ini satu-satunya jalur tanpa melatih ulang E3.
 """
 
 
@@ -409,9 +428,40 @@ def _self_test() -> None:
     except AssertionError as e:
         assert "exp5_train" in str(e), f"pesan fail-fast tak terduga: {e}"
 
+    # (h) _arah_pdp end-to-end: kuantil fold-safe (mask panjang PENUH untuk feats.loc) +
+    #     booster dibaca per (rep, fold). Regresi: bug mask panjang 244 dipakai untuk 306 baris.
+    kol_h = list(C.NUMERIC_FEATURES) + list(ITEM_COLS)
+    n_h = 40
+    feats_h = pd.DataFrame(rng.normal(size=(n_h, len(kol_h))), columns=kol_h)
+    for k in C.CATEGORICAL_FEATURES:
+        feats_h[k] = rng.choice(["a", "b"], size=n_h)
+    y_h = np.where(np.arange(n_h) % 4 == 0, 3.0, 1.8)  # 10 siswa ekor (>= 2,5)
+    feats_h[C.TARGET_CONT] = y_h
+    fnum = kol_h[0]
+    feats_h[fnum] = np.linspace(1.0, 4.0, n_h)        # variasi cukup: kuantil 25 != 75
+    meta_h = {"repeats": 2, "folds": 2}
+    global MODEL_DIR
+    simpan_model = MODEL_DIR
+    with tempfile.TemporaryDirectory() as tmpd:
+        MODEL_DIR = Path(tmpd)
+        try:
+            for rep in range(meta_h["repeats"]):
+                for fold, (itr, ite) in enumerate(
+                        KFold(meta_h["folds"], shuffle=True,
+                              random_state=C.RANDOM_SEED + rep).split(feats_h)):
+                    xtr, _ = _encode(feats_h.iloc[itr], feats_h.iloc[ite], "76")
+                    bh = xgb.train({**C.BASE_XGB, "max_depth": 2, "learning_rate": 0.3,
+                                    "objective": "reg:squarederror"},
+                                   xgb.DMatrix(xtr, label=y_h[itr]), num_boost_round=20)
+                    bh.save_model(str(MODEL_DIR / f"ronde_r{rep}_f{fold}.ubj"))
+            pdp_h = _arah_pdp(meta_h, feats_h, kol_h, [fnum])
+        finally:
+            MODEL_DIR = simpan_model
+    assert fnum in pdp_h and np.isfinite(pdp_h[fnum]), f"PDP fold-safe gagal: {pdp_h}"
+
     print("self-test OK: peta kolom encode, agregasi one-hot bertanda, SHAP end-to-end "
           "(fitur informatif rank 1), tabel subgrup+rank, bootstrap deterministik+CI sah, "
-          "PDP-slope tanda benar, fail-fast artefak hilang")
+          "PDP-slope tanda benar + PDP fold-safe end-to-end, fail-fast artefak hilang")
 
 
 # ---------- main ----------
@@ -461,7 +511,7 @@ def main() -> None:
     top_fitur = list(tabel["fitur"].head(TOP_K))
     pdp = _arah_pdp(meta, feats, num_cols, top_fitur)
     tabel["pdp_slope"] = [pdp.get(f, float("nan")) for f in tabel["fitur"]]
-    tabel["arah_pdp"] = ["naik" if v > 0 else ("turun" if v < 0 else "-")
+    tabel["arah_pdp"] = [("naik" if v >= AMBANG_ARAH else "turun" if v <= -AMBANG_ARAH else "~0")
                          if v == v else "-" for v in tabel["pdp_slope"]]
 
     kat = pd.DataFrame({
