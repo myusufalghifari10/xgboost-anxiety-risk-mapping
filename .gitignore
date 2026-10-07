@@ -31,6 +31,7 @@ venv/
 outputs/exp2/
 outputs/exp3/
 outputs/exp4/
+outputs/exp5/
 
 # Checkpoint percobaan-1 (berisi OOF per-siswa — lokal saja, jangan pernah di-push)
 outputs/checkpoints/
