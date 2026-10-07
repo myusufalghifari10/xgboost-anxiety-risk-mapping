@@ -70,12 +70,21 @@ CATATAN PENYIMPANGAN (semua disengaja & dicatat):
   g) base_score di-set EKSPLISIT ke mean(y fold latih) di _fit_custom: dengan obj= custom
      XGBoost TIDAK mengestimasi base_score dari label dan jatuh ke default 0,5
      (terverifikasi via save_config) -> tanpa ini E5 start dari intercept 0,5, bukan ~1,97.
-  h) Skala gradien dinormalisasi (1/mean(tau), |grad| rata-rata ~ 1) agar ukuran langkah
-     per ronde sebanding dengan reg:absoluteerror E3 (|grad| = 1); yang diuji adalah
-     ASIMETRI loss, bukan penskalaan learning-rate efektif. Catatan jujur: implementasi
-     Newton-L1 custom ini TIDAK identik-bit dengan native reg:absoluteerror (terukur
-     berbeda di data sintetis) -> selisih E5 vs E3 = efek asimetri + efek parameterisasi
-     objective custom, dan itu dilaporkan apa adanya (bukan diklaim murni asimetri).
+  h) Loss = EXPECTILE asimetris per baris (L2 asimetris), kemiringan dari tau_i yang sama:
+       e = y - pred;  L_i = tau_i*e^2 (e>0) ; (1-tau_i)*e^2 (e<0)
+       grad = -2*tau_i*e (e>0) / -2*(1-tau_i)*e (e<0) ; hess = 2*tau_i / 2*(1-tau_i),
+     keduanya dikalikan bobot bin w. ALASAN (bukan preferensi): versi L1-asimetris custom
+     (grad = -tau konstan, hess = 1) DIVERGEN saat run nyata 2026-10-07 — MAE per fold sampai
+     2,7 pada skala 1-4 dan alpha decode jatuh ke 0,01-0,02 (raw meledak), karena gradien
+     bermagnitudo konstan tak pernah mengecil sehingga 812 ronde warisan E3 terus mendorong
+     lalu overshoot. Native reg:absoluteerror E3 kebal karena XGBoost memakai pembaruan leaf
+     adaptif yang TIDAK tersedia bagi objective custom.
+     Uji sintetis 3 seed (params warisan E3, 812 ronde): L1-tilt MAE uji 0,376 dengan prediksi
+     0,90-2,84 (overfit); expectile MAE uji 0,312 vs native 0,310 sementara slope 0,317 vs
+     0,231 (+37%) dan stabil (sd 0,008) -> tetap menguji hipotesis anti-warp.
+     Catatan jujur: ini perubahan KELUARGA loss (L1 -> L2 asimetris) dan params per fold tetap
+     warisan E3 yang dituning untuk reg:absoluteerror -> selisih E5 vs E3 = efek asimetri +
+     efek keluarga loss, dilaporkan apa adanya (bukan diklaim murni asimetri).
 
 Pemakaian (EKSEKUSI = YUSUF):
   .venv/bin/python src/exp5_train.py --self-test       # data sintetis
@@ -124,15 +133,15 @@ def _tau(y: np.ndarray, y_mid: float, gamma: float) -> np.ndarray:
     return np.clip(0.5 + gamma * (np.asarray(y, float) - y_mid), TAU_MIN, TAU_MAX)
 
 
-def _grad_hess(pred: np.ndarray, y: np.ndarray, tau: np.ndarray, w: np.ndarray,
-               skala: float = 1.0):
-    """grad = dL/dpred; hess = 1 (gaya L1); keduanya dikalikan bobot bin w.
+def _grad_hess(pred: np.ndarray, y: np.ndarray, tau: np.ndarray, w: np.ndarray):
+    """grad/hess EXPECTILE asimetris (L2 asimetris) per baris, keduanya dikali bobot bin w.
 
-    L = tau*max(e,0) + (1-tau)*max(-e,0), e = y - pred
-      e > 0 (underprediksi) -> grad = -tau   (negatif -> update booster menaikkan pred)
-      e < 0 (overprediksi)  -> grad = +(1-tau)
-    skala mengalikan grad SAJA (normalisasi rata-rata |grad| ~ 1; catatan h)
-    supaya ukuran langkah per ronde sebanding dengan reg:absoluteerror E3.
+    e = y - pred;  L_i = tau_i*e^2 bila e > 0, (1-tau_i)*e^2 bila e < 0
+      e > 0 (underprediksi) -> grad = -2*tau_i*e     (negatif -> booster menaikkan pred)
+      e < 0 (overprediksi)  -> grad = -2*(1-tau_i)*e (positif -> booster menurunkan pred)
+      hess = 2*tau_i (e>0) / 2*(1-tau_i) (e<0) — selalu positif, dan gradien MENGEcil saat
+      residual mengecil sehingga boosting konvergen (catatan h: versi L1 bermagnitudo
+      konstan divergen pada 812 ronde warisan E3).
     """
     pred = np.asarray(pred, float)
     y = np.asarray(y, float)
@@ -141,21 +150,22 @@ def _grad_hess(pred: np.ndarray, y: np.ndarray, tau: np.ndarray, w: np.ndarray,
     assert len(pred) == len(y) == len(tau) == len(w), (
         f"panjang tidak sejajar: pred={len(pred)} y={len(y)} tau={len(tau)} w={len(w)}")
     e = y - pred
-    grad = np.where(e > 0, -tau, np.where(e < 0, 1.0 - tau, 0.0)) * (w * skala)
-    hess = np.ones_like(pred) * w
+    pos = e > 0
+    grad = np.where(pos, -2.0 * tau * e, -2.0 * (1.0 - tau) * e) * w
+    hess = np.where(pos, 2.0 * tau, 2.0 * (1.0 - tau)) * w
     return grad, hess
 
 
-def _make_obj(tau: np.ndarray, w: np.ndarray, skala: float):
-    """Closure objective untuk xgb.train. tau/w/skala = urutan BARIS LATIH (dibuat per fit;
+def _make_obj(tau: np.ndarray, w: np.ndarray):
+    """Closure objective untuk xgb.train. tau/w = urutan BARIS LATIH (dibuat per fit;
     xgb.train hanya memanggil objective dengan DMatrix latih, tanpa evals)."""
     assert len(tau) == len(w), f"panjang tau ({len(tau)}) != w ({len(w)})"
-    assert np.isfinite(skala) and skala > 0, f"skala tidak valid: {skala}"
+    assert np.all(np.isfinite(tau)) and np.all(np.isfinite(w)), "tau/w mengandung non-finite"
 
     def obj(preds: np.ndarray, dtrain: xgb.DMatrix):
         y = dtrain.get_label()
         assert len(y) == len(tau), f"panjang label ({len(y)}) != tau ({len(tau)}) — fitur campur"
-        return _grad_hess(preds, y, tau, w, skala)
+        return _grad_hess(preds, y, tau, w)
     return obj
 
 
@@ -166,12 +176,10 @@ def _fit_custom(params_e3: dict, x: np.ndarray, y: np.ndarray, gamma: float,
     assert int(params_e3["n_estimators"]) > 0, "n_estimators tidak valid"
     y_mid = float(np.mean(y))
     tau = _tau(y, y_mid, gamma)
-    # Normalisasi skala gradien (catatan h): rata-rata |grad| ~ 1 setara parameterisasi
-    # reg:absoluteerror E3 (|grad| = 1, hess = 1) -> yang diuji ASIMETRI loss, bukan
-    # penskalaan learning-rate efektif. hess TETAP ones*w.
-    skala = 1.0 / float(np.mean(tau))
-    assert 1.2 < skala < 3.0, (
-        f"skala gradien {skala:.3f} di luar rentang wajar (mean tau {np.mean(tau):.3f})")
+    # Loss expectile asimetris (catatan h): gradien mengecil bersama residual -> konvergen.
+    # Tanpa normalisasi skala: grad/hess adalah turunan loss yang sama (konsisten Newton).
+    assert TAU_MIN - 1e-9 <= float(np.min(tau)) and float(np.max(tau)) <= TAU_MAX + 1e-9, (
+        f"tau di luar [{TAU_MIN}, {TAU_MAX}] — clip rusak")
     bp = {**C.BASE_XGB,
           **{k: v for k, v in params_e3.items() if k != "n_estimators"},
           "objective": "reg:squarederror",  # placeholder INERT (diuji self-test e5)
@@ -184,7 +192,7 @@ def _fit_custom(params_e3: dict, x: np.ndarray, y: np.ndarray, gamma: float,
         bp["monotone_constraints"] = "(" + ",".join(str(int(v)) for v in mono_vec) + ")"
     dm = xgb.DMatrix(x, label=y)  # TANPA weight: bobot sudah di grad/hess (catatan b)
     return xgb.train(bp, dm, num_boost_round=int(params_e3["n_estimators"]),
-                     obj=_make_obj(tau, w, skala))
+                     obj=_make_obj(tau, w))
 
 
 def _vektor_monotone(n_cols: int, mono: dict, num_cols: list[str]) -> np.ndarray:
@@ -540,8 +548,9 @@ def run_cv(repeats: int, folds: int, fresh: bool) -> dict:
             "estimator konsisten E[y|x] (desain anti-warp, bukan regresi biasa)",
             "hyperparameter diwarisi dari E3 yang dituning untuk reg:absoluteerror TANPA "
             "monotone constraints (perbandingan berpasangan, bukan tuning ulang)",
-            "skala gradien dinormalisasi 1/mean(tau) (|grad| rata-rata ~ 1) supaya langkah "
-            "per ronde sebanding E3; yang diuji asimetri loss, bukan penskalaan langkah",
+            "loss expectile asimetris per baris (L2 asimetris; gradien mengecil bersama "
+            "residual sehingga konvergen) — versi L1-asimetris custom divergen di run "
+            "2026-10-07 (MAE fold sampai 2,7), lihat docstring butir h",
             "leaf value custom memakai Newton (-sum g/(sum h+lambda)) sedangkan native "
             "reg:absoluteerror memakai pembaruan leaf khusus -> sebanding, TIDAK identik bit",
             "mae_ekor/mae_non_ekor pooled dihitung atas baris-ulangan (43/263 siswa x repeats) "
@@ -600,9 +609,13 @@ def _self_test() -> None:
     tau_a = np.array([0.7, 0.7, 0.7])
     w_a = np.array([2.0, 2.0, 2.0])
     g, h = _grad_hess(pred, y_a, tau_a, w_a)
-    assert np.isclose(g[0], -0.7 * 2.0) and np.isclose(g[1], 0.3 * 2.0) and g[2] == 0.0, \
-        f"grad salah: {g} (harus -tau*w, +(1-tau)*w, 0)"
-    assert np.allclose(h, 2.0), f"hess harus w (gaya L1), dapat {h}"
+    e_a = y_a - pred  # +2, -2, 0
+    assert np.allclose(g, np.where(e_a > 0, -2.0 * tau_a * e_a, -2.0 * (1.0 - tau_a) * e_a) * w_a), \
+        f"grad expectile salah: {g}"
+    assert np.allclose(h, np.where(e_a > 0, 2.0 * tau_a, 2.0 * (1.0 - tau_a)) * w_a), \
+        f"hess expectile salah: {h}"
+    assert np.all(h > 0), f"hess harus selalu positif: {h}"
+    assert g[2] == 0.0, "e=0 -> grad harus tepat 0"
     t = _tau(np.array([1.0, 4.0]), y_mid=2.0, gamma=0.5)
     assert np.isclose(t[0], 0.2), f"tau y=1: clip bawah harus 0,20, dapat {t[0]}"
     assert np.isclose(t[1], 0.8), f"tau y=4: clip atas harus 0,80, dapat {t[1]}"
@@ -677,19 +690,27 @@ def _self_test() -> None:
     pk = b_k.predict(xgb.DMatrix(xa2))
     assert np.all(np.diff(pk) >= -1e-6), f"constraint +1 harus memaksa naik: {np.diff(pk)}"
 
-    # (e3) normalisasi skala gradien: mean|grad| ~ 1 saat mean(tau) = 0,5 (catatan h);
-    # assert batas skala benar-benar aktif (fixture ekor-berat, gamma besar)
-    tau_b = np.full(n, 0.5)
-    y_b = np.where(np.arange(n) % 2 == 0, 1.0, -1.0)
-    g_b, _ = _grad_hess(np.zeros(n), y_b, tau_b, np.ones(n), 1.0 / float(np.mean(tau_b)))
-    assert abs(float(np.mean(np.abs(g_b))) - 1.0) < 1e-9, \
-        f"mean|grad| harus ~1 setelah normalisasi, dapat {np.mean(np.abs(g_b))}"
-    y_skew = np.where(np.arange(n) < 108, 1.0, 3.5)  # mean 1,25 -> mean(tau) ~ 0,26
-    try:
-        _fit_custom({**params_t, "n_estimators": 3}, x_t, y_skew, 3.0, w_t, None)
-        raise AssertionError("assert batas skala gradien tidak bekerja")
-    except AssertionError as e:
-        assert "skala" in str(e), f"pesan skala tak terduga: {e}"
+    # (e3) expectile: arah tilt benar + gradien mengecil bersama residual (konvergen)
+    tau_g = np.array([0.7, 0.3, 0.5])
+    p_g = np.array([2.0, 2.0, 2.0])
+    y_g = np.array([3.0, 3.0, 2.0])          # e = +1, +1, 0
+    w_g = np.array([1.0, 1.0, 2.0])
+    g_g, h_g = _grad_hess(p_g, y_g, tau_g, w_g)
+    h_exp = np.where(y_g - p_g > 0, 2.0 * tau_g, 2.0 * (1.0 - tau_g)) * w_g
+    assert np.allclose(h_g, h_exp) and np.all(h_g > 0), f"hess expectile salah: {h_g}"
+    assert g_g[0] < g_g[1] < 0, \
+        f"tilt salah: underprediksi baris tau besar harus lebih didorong naik: {g_g}"
+    assert abs(g_g[0]) > abs(g_g[1]), f"magnitudo tilt terbalik: {g_g}"
+    assert g_g[2] == 0.0, f"e=0 harus grad 0, dapat {g_g[2]}"
+    g_kecil, _ = _grad_hess(np.array([1.9]), np.array([2.0]), np.array([0.7]), np.ones(1))
+    g_besar, _ = _grad_hess(np.array([1.0]), np.array([2.0]), np.array([0.7]), np.ones(1))
+    assert abs(g_kecil[0]) < abs(g_besar[0]), "gradien harus mengecil saat residual mengecil"
+    # regresi: fit PANJANG (400 ronde) tidak boleh meledak — versi L1 divergen di run nyata
+    b_panjang = _fit_custom({**params_t, "n_estimators": 400}, x_t, y_t, 0.25, w_t, None)
+    p_panjang = b_panjang.predict(xgb.DMatrix(x_t))
+    assert np.isfinite(p_panjang).all(), "prediksi non-finite"
+    assert p_panjang.min() > float(y_t.min()) - 2.0 and p_panjang.max() < float(y_t.max()) + 2.0, \
+        f"prediksi keluar rentang wajar (tanda divergen): [{p_panjang.min():.2f}, {p_panjang.max():.2f}]"
 
     # (e4) base_score eksplisit = mean(y latih) di config booster (catatan g)
     bs_raw = json.loads(b_custom.save_config())["learner"]["learner_model_param"]["base_score"]
@@ -703,7 +724,7 @@ def _self_test() -> None:
     w_ph = np.ones(n)
 
     def obj_ph(p_, dm_):
-        return _grad_hess(p_, dm_.get_label(), tau_ph, w_ph, 2.0)
+        return _grad_hess(p_, dm_.get_label(), tau_ph, w_ph)
 
     def _fit_ph_ph(ph: str):
         return xgb.train({**C.BASE_XGB,
@@ -800,7 +821,7 @@ def _self_test() -> None:
     except AssertionError as e:
         assert "duplikat" in str(e), f"pesan validasi duplikat tak terduga: {e}"
 
-    print("self-test OK: grad/hess+tau clip+skala (mean|grad|=1), gamma deterministik "
+    print("self-test OK: grad/hess expectile+tau clip (gradien mengecil, tak divergen), gamma deterministik "
           "(tie->kecil), monotone 3-nonzero+fail-fast+constraint MENGIKAT, "
           "objective custom terpakai+bobot aktif+base_score=mean(y)+placeholder inert, "
           "end-to-end 1rep x 2fold + booster .ubj + checkpoint atomik + resume loader, "
