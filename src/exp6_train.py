@@ -479,11 +479,16 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
                 "median_abs_delta": float(np.median(beda)),
                 "min_korelasi": (min(korel) if korel else None),
                 "catatan": "c0 = replika E3; delta > 0,02 berarti ada perubahan pipeline/pustaka"}
-            if max(beda) > 0.02:
-                belum = (f"c0 tidak mereproduksi ronde E3 (max |delta| = {max(beda):.4f} > 0,02) -> "
-                         "ada perubahan pipeline/pustaka; perbandingan vs E3 WAJIB dicatat")
-                hasil["wajib_jujur"]["reproduksi_c0"] = belum
-                print(f"[exp6] PERINGATAN: {belum}")
+            # Peringatan hanya bermakna bila dibandingkan dengan artefak E3 yang sebenarnya;
+            # pada uji sintetis checkpoint E3-nya palsu (pred_raw konstan) -> cukup dicatat.
+            if Path(ckpt_e3) == E3_CKPT and Path(ref_csv) == E3_CSV:
+                if max(beda) > 0.02:
+                    belum = (f"c0 tidak mereproduksi ronde E3 (max |delta| = {max(beda):.4f} > 0,02) -> "
+                             "ada perubahan pipeline/pustaka; perbandingan vs E3 WAJIB dicatat")
+                    hasil["wajib_jujur"]["reproduksi_c0"] = belum
+                    print(f"[exp6] PERINGATAN: {belum}")
+            else:
+                hasil["reproduksi_c0_vs_e3"]["catatan"] += " (dibandingkan dengan checkpoint non-E3: uji sintetis)"
         else:
             hasil["reproduksi_c0_vs_e3"] = {
                 "n_ronde": 0, "max_abs_delta": None, "median_abs_delta": None, "min_korelasi": None,
@@ -578,6 +583,8 @@ def _self_test() -> None:
         assert j["sumber"]["params_e3"] == j["params_sha_e3"], "params_sha tidak konsisten"
         assert PRIMARY in j["keputusan"], "keputusan tidak menyebut arm PRIMARY"
         assert j["reproduksi_c0_vs_e3"]["n_ronde"] == folds and np.isfinite(j["reproduksi_c0_vs_e3"]["max_abs_delta"])
+        assert "reproduksi_c0" not in j["wajib_jujur"], \
+            "peringatan reproduksi muncul di fixture sintetis (harus hanya untuk artefak E3 nyata)"
         assert len(list((td / "out").glob("*_per_siswa.csv"))) == len(ARMS)
 
         # (b2) bukti arm BENAR-BENAR aktif: pred_raw harus berbeda antar arm.
