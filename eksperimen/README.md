@@ -13,6 +13,7 @@ percobaan berikutnya.
 | 03 | `eksperimen-03-weighted-loss-warmstart-2026-10-04` | Bobot bin √+cap3 (fold-safe) + warm-start Optuna | **DIPAKAI** | **0,2257 (0,3707)** |
 | 04 | `eksperimen-04-softlabel-eb-taildecode-2026-10-04` | Soft-label empiris-Bayes + decode tanpa-shrink untuk ekor | DITOLAK (ekor +0,050; badan −0,008) | 0,2282 (0,4234) |
 | 05 | `eksperimen-05-perang-warp-2026-10-07` | Loss expectile asimetris per-row (anti-warp) + monotone 3 fitur + params warisan E3 | DITOLAK (slope tak bergerak 0,6087 vs 0,6094; delta MAE tidak signifikan p=0,63) | 0,2245 (0,3634) |
+| 06 | `eksperimen-06-fitur-bagging-bobot-2026-10-11` | 9 arm: fitur baru dari kolom lama (gaya respons, PCA/PLS fold-safe, interaksi) + bagging k=5 + arm bobot p/cap — fold & params E3 identik | DITOLAK (tidak ada arm lolos K1; PRIMARY c8 +0,0064 p=0,13; arm terbaik c4 −0,0008 p=0,48 vs ambang deteksi 0,0021; c0 mereproduksi E3 bit-identik) | 0,2321 (0,3658) |
 
 ## Penamaan
 
