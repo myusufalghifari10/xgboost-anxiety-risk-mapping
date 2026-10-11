@@ -67,7 +67,10 @@ OBJECTIVE = "reg:absoluteerror"
 AMBANG_EKOR = C.ANXIETY_HIGH_THRESHOLD  # 2,5
 BAG_K = 5
 TOLERANSI_SISI = 0.003  # guard ekor/badan (sama dengan disiplin E4/E5)
-LEBAR_UJI_MIN = 0.0047  # efek minimal agar uji berpasangan n=306 bisa p<0,05
+# Efek minimal agar uji berpasangan (n=306) bisa p<0,05. Ini ESTIMASI dari pasangan lain
+# (E3 vs E1: SD selisih |error| ≈ 0,042) — BUKAN angka run ini. Setiap run menghitung
+# ambangnya sendiri dari datanya (lihat verdict.<arm>.ambang_deteksi).
+LEBAR_UJI_MIN_ESTIMASI = 0.0047
 
 ARMS: dict[str, dict] = {
     "c0": {"fitur": (), "bag": 1, "bobot": (0.50, 3.0), "ket": "baseline E3"},
@@ -98,6 +101,25 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
 
 
+def _versi_lib() -> dict:
+    """Versi pustaka ikut masuk fingerprint: hasil tidak bisa direproduksi lintas versi."""
+    import sklearn
+    return {"xgboost": xgb.__version__, "numpy": np.__version__, "sklearn": sklearn.__version__}
+
+
+def _cek_finite(obj, path: str = "hasil") -> None:
+    """Gagalkan dengan pesan jelas bila ada NaN/inf SEBELUM penulis JSON ketat, supaya
+    tidak berubah jadi ValueError kriptik setelah berjam-jam compute."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _cek_finite(v, f"{path}.{k}")
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            _cek_finite(v, f"{path}[{i}]")
+    elif isinstance(obj, float) and not np.isfinite(obj):
+        raise AssertionError(f"nilai tidak finite di {path}: {obj}")
+
+
 def bobot(y: np.ndarray, p: float = 0.5, cap: float = 3.0) -> np.ndarray:
     """w = min(cap, (ref/n_bin)**p) per bin; ref = median bin aktif di TRAIN fold.
     p=0,5 cap=3 harus identik dengan bobot E3 (diuji --self-test). Hanya y_train."""
@@ -113,8 +135,8 @@ def bobot(y: np.ndarray, p: float = 0.5, cap: float = 3.0) -> np.ndarray:
     return w / w.mean()
 
 
-def _params_e3(rep: int, fold: int, ckpt: Path = E3_CKPT) -> dict:
-    """Hyperparameter E3 per fold (warisan) — fail-fast bila checkpoint hilang/tidak lengkap."""
+def _baca_e3(rep: int, fold: int, ckpt: Path = E3_CKPT) -> dict:
+    """Baca checkpoint E3 satu ronde (params + idx) — fail-fast bila hilang/tidak lengkap."""
     f = Path(ckpt) / f"ronde_r{rep}_f{fold}.json"
     assert f.exists(), f"checkpoint E3 hilang: {f}"
     d = json.loads(f.read_text())
@@ -122,7 +144,21 @@ def _params_e3(rep: int, fold: int, ckpt: Path = E3_CKPT) -> dict:
     assert isinstance(p, dict), f"tidak ada 'params' di {f}"
     kurang = [k for k in KUNCI_PARAM if k not in p]
     assert not kurang, f"params E3 tidak lengkap di {f}: kurang {kurang}"
+    assert "idx" in d, f"tidak ada 'idx' di {f} (params-nya tidak bisa dibuktikan milik fold ini)"
+    return d
+
+
+def _params_e3(rep: int, fold: int, ckpt: Path = E3_CKPT) -> dict:
+    p = _baca_e3(rep, fold, ckpt)["params"]
     return {k: (int(p[k]) if C.XGB_SEARCH_SPACE[k][0] == "int" else float(p[k])) for k in KUNCI_PARAM}
+
+
+def _params_sha(repeats: int, folds: int, ckpt: Path = E3_CKPT) -> str:
+    """Sidik SELURUH params E3 yang diwariskan (semua ronde) — masuk fingerprint & artefak,
+    sehingga resume tidak mungkin mencampur dua himpunan hyperparameter yang berbeda."""
+    semua = {f"r{rep}_f{fold}": _params_e3(rep, fold, ckpt)
+             for rep in range(repeats) for fold in range(folds)}
+    return hashlib.sha256(json.dumps(semua, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _isi_nan(tr: np.ndarray, te: np.ndarray, nama: list[str]) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -161,7 +197,10 @@ def _rakit(xtr_b: np.ndarray, xte_b: np.ndarray, tr: pd.DataFrame, te: pd.DataFr
         return xtr_b, xte_b, lapor
     A, B = np.hstack([xtr_b] + tambah_tr), np.hstack([xte_b] + tambah_te)
     assert A.shape[1] == B.shape[1] == xtr_b.shape[1] + len(nama), "lebar fitur train/test beda"
-    assert np.isfinite(A).all() and np.isfinite(B).all(), "fitur tambahan mengandung NaN"
+    # Hanya fitur TAMBAHAN yang wajib finite. Blok dasar boleh ber-NaN: XGBoost menangani
+    # missing secara native (dan parquet proyek memang tidak punya item kosong).
+    assert np.isfinite(np.hstack(tambah_tr)).all() and np.isfinite(np.hstack(tambah_te)).all(), \
+        "fitur tambahan mengandung NaN"
     return A, B, lapor
 
 
@@ -180,37 +219,56 @@ def _pred(params: dict, xtr: np.ndarray, ytr: np.ndarray, w: np.ndarray,
     if bag <= 1:
         return _fit(params, xtr, ytr, OBJECTIVE, w).predict(xte)
     pred = np.zeros(len(xte), float)
-    for s in range(bag):
-        pred += _fit_seed(params, xtr, ytr, w, seed + 7919 * s).predict(xte)
+    for s in range(bag):  # s+1: seed bagging tidak pernah sama dengan seed dasar (42) di r0f0
+        pred += _fit_seed(params, xtr, ytr, w, seed + 7919 * (s + 1)).predict(xte)
     return pred / bag
 
 
 # ---------- referensi & gerbang ----------
 
 def _ref_e3(csv: Path = E3_CSV) -> tuple[dict, pd.Series]:
+    """Referensi E3 dari artefak beku. Bila memakai CSV default, angka inti dicek silang ke
+    exp3_full_<fp>.json supaya referensi gerbang tidak bisa bergeser diam-diam."""
     d = pd.read_csv(csv)
     ens = d.groupby("row_id").agg(y=("y", "first"), p=("pred_proc", "mean"))
     err = (ens["y"] - ens["p"]).abs()
     ekor = ens["y"] >= AMBANG_EKOR
     ref = {"total": float(err.mean()), "ekor": float(err[ekor].mean()), "badan": float(err[~ekor].mean())}
+    if Path(csv) == E3_CSV and E3_JSON.exists():
+        j = json.loads(E3_JSON.read_text())["pred_proc"]
+        for kunci, nilai in (("total", j["mae_ensemble"]), ("ekor", j["mae_ensemble_ekor"])):
+            assert abs(ref[kunci] - float(nilai)) < 1e-6, (
+                f"referensi gerbang bergeser: CSV {kunci}={ref[kunci]:.6f} vs JSON {float(nilai):.6f}")
     return ref, err
 
 
 def _uji_paired(a: np.ndarray, b: np.ndarray) -> tuple[float | None, float | None]:
     """Uji t berpasangan yang aman untuk kasus degenerat.
-    Mengembalikan (p, delta). p=None bila panjang beda / ada non-finite / varians
-    selisih NOL (tidak terdefinisi) — None berarti TIDAK signifikan, bukan dianggap lulus."""
+    Mengembalikan (p, delta). p=None bila panjang beda / ada non-finite / varians selisih
+    nol atau praktis-nol (tidak terdefinisi) — None berarti TIDAK signifikan, bukan lulus."""
     a, b = np.asarray(a, float).ravel(), np.asarray(b, float).ravel()
     if len(a) != len(b) or len(a) < 3 or not (np.isfinite(a).all() and np.isfinite(b).all()):
         return None, None
     d = a - b
-    if float(np.std(d, ddof=1)) == 0.0:
+    sd = float(np.std(d, ddof=1))
+    if not np.isfinite(sd) or sd <= 1e-12:
         return None, float(d.mean())
     _, p = stats.ttest_rel(a, b)
     return (None if not np.isfinite(p) else float(p)), float(d.mean())
 
 
-def _gerbang(m: dict, ref: dict, p_paired: float | None, delta: float | None) -> dict:
+def _ambang_deteksi(a: np.ndarray, b: np.ndarray) -> float | None:
+    """Efek |delta| minimal agar uji berpasangan bisa p<0,05 pada run INI (dihitung, bukan diklaim)."""
+    a, b = np.asarray(a, float).ravel(), np.asarray(b, float).ravel()
+    d = a - b
+    sd = float(np.std(d, ddof=1))
+    if len(d) < 3 or not np.isfinite(sd) or sd <= 1e-12:
+        return None
+    return float(abs(stats.t.ppf(0.025, len(d) - 1)) * sd / np.sqrt(len(d)))
+
+
+def _gerbang(m: dict, ref: dict, p_paired: float | None, delta: float | None,
+             ambang: float | None = None) -> dict:
     k1 = bool(m["mae_ensemble"] < ref["total"] and p_paired is not None and p_paired < 0.05
               and delta is not None and delta < 0)
     k2 = bool(m["mae_ensemble_ekor"] <= ref["ekor"] + TOLERANSI_SISI)
@@ -218,6 +276,7 @@ def _gerbang(m: dict, ref: dict, p_paired: float | None, delta: float | None) ->
     out = {"K1_efek": k1, "K2_ekor": k2, "K3_badan": k3, "lolos": bool(k1 and k2 and k3),
            "p_paired": None if p_paired is None else float(p_paired),
            "delta_total": None if delta is None else float(delta),
+           "ambang_deteksi": None if ambang is None else float(ambang),
            "ref": {"total": ref["total"], "ekor": ref["ekor"], "badan": ref["badan"]},
            "toleransi_sisi": TOLERANSI_SISI}
     if p_paired is None:
@@ -250,7 +309,16 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
 
     data_sha = _sha(FEATURES_EXP2) if frame is None else hashlib.sha256(
         pd.util.hash_pandas_object(feats, index=True).values.tobytes()).hexdigest()[:16]
-    sumber = {"exp6_train": _sha(Path(__file__)), "exp6_feats": _sha(Path(F6.__file__))}
+    # Fingerprint menutup SEMUA sumber yang bisa mengubah angka: 2 file exp6, modul pembantu
+    # exp2 (encode/fit/decode/alpha), daftar kolom, params E3 per fold, dan versi pustaka.
+    import exp2_features as _E2F
+    import exp2_train as _E2T
+    sumber = {"exp6_train": _sha(Path(__file__)), "exp6_feats": _sha(Path(F6.__file__)),
+              "exp2_train": _sha(Path(_E2T.__file__)), "exp2_features": _sha(Path(_E2F.__file__)),
+              "params_e3": _params_sha(repeats, folds, ckpt_e3),
+              "kolom": {"numeric": C.NUMERIC_FEATURES, "kategorik": C.CATEGORICAL_FEATURES,
+                        "item": ITEM_COLS, "space": tuple(C.XGB_SEARCH_SPACE)},
+              "versi": _versi_lib()}
     fp = _fingerprint(repeats, folds, data_sha, sumber, tuple(arm_names))
     ckpt = out_dir / "checkpoints" / f"{nama}_{fp}"
     if fresh and ckpt.exists():
@@ -269,12 +337,16 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
                 # guard identitas fold: resume TIDAK boleh memakai ronde dari fold lain
                 assert rec["idx"] == [int(i) for i in ite], f"idx checkpoint tidak cocok ({f_json})"
                 assert np.allclose(np.array(rec["y_true"], float), y[ite]), f"y_true tidak cocok ({f_json})"
+                assert rec.get("params") == _params_e3(rep, fold, ckpt_e3), (
+                    f"params E3 berubah sejak checkpoint dibuat -> resume DITOLAK ({f_json})")
                 rounds.append(rec)
                 continue
 
             tr, te = feats.iloc[itr].copy(), feats.iloc[ite].copy()
             ytr, yte = y[itr], y[ite]
             params = _params_e3(rep, fold, ckpt_e3)
+            assert [int(i) for i in _baca_e3(rep, fold, ckpt_e3)["idx"]] == [int(i) for i in ite], (
+                "params E3 bukan milik partisi fold yang dievaluasi ini")
             xtr_b, xte_b = _encode(tr, te, "76")
 
             pred_arm, lapor_arm, w_arm = {}, {}, {}
@@ -284,7 +356,7 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
                 pred_arm[nm] = [float(v) for v in _pred(params, xtr, ytr, w, xte,
                                                         ARMS[nm]["bag"], seed_dasar + 1000 * rep + fold)]
                 lapor_arm[nm] = lap
-                w_arm[nm] = float(w.mean())
+                w_arm[nm] = {"mean": float(w.mean()), "min": float(w.min()), "max": float(w.max())}
 
             # alpha terpool dari inner-OOF arm acuan (dipakai bersama semua arm)
             xtr_a, xte_a, _ = _rakit(xtr_b.copy(), xte_b.copy(), tr, te, ytr, ARMS[arm_alpha])
@@ -299,7 +371,7 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
             rec = {"rep": rep, "fold": fold, "idx": [int(i) for i in ite], "y_true": yte.tolist(),
                    "params": params, "pred_raw": pred_arm, "inner_p": ip, "inner_y": iy,
                    "mu": float(ytr.mean()), "lo": float(ytr.min()), "hi": float(ytr.max()),
-                   "w_mean": w_arm, "imputasi": lapor_arm, "arm_alpha": arm_alpha}
+                   "w_ringkas": w_arm, "imputasi": lapor_arm, "arm_alpha": arm_alpha}
             _simpan(f_json, rec)
             rounds.append(rec)
             ekor = yte >= AMBANG_EKOR
@@ -310,25 +382,37 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
 
     alpha = _fit_alpha([(np.array(r["inner_p"]), np.array(r["inner_y"]), r["mu"]) for r in rounds])
     ref, err_e3 = _ref_e3(ref_csv)
+    if Path(ref_csv) == E3_CSV:  # guard hanya untuk referensi beku yang sebenarnya
+        assert len(err_e3) >= 100 and err_e3.index.is_monotonic_increasing, "referensi E3 tidak wajar"
 
     hasil = {"eksperimen": 6, "mode": f"{nama}_full", "fingerprint": fp, "alpha_pooled": alpha,
              "repeats": repeats, "folds": folds, "arm_alpha": arm_alpha, "objective": OBJECTIVE,
              "arms": {k: ARMS[k] for k in arm_names}, "primary": PRIMARY,
+             "sumber": sumber, "params_sha_e3": sumber["params_e3"],
              "wajib_jujur": {
-                 "alpha_bersama": "alpha decode dipool dari inner-OOF arm c0 dan dipakai semua arm "
-                                  "(E3 memakai alpha arm-nya sendiri); pred_raw selalu dilaporkan",
+                 "alpha_bersama": f"alpha decode dipool dari inner-OOF arm {arm_alpha} dan dipakai "
+                                  "semua arm (E3 memakai alpha arm-nya sendiri); pred_raw selalu dilaporkan",
                  "params_warisan": "hyperparameter E3 per fold dipakai apa adanya untuk semua arm — "
                                    "tidak optimal untuk fitur baru, sengaja agar perbandingan satu variabel",
-                 "lebar_uji": f"efek < {LEBAR_UJI_MIN} tidak akan lolos uji berpasangan n=306 meski angkanya membaik",
+                 "lebar_uji": ("ambang deteksi uji berpasangan dihitung per-arm dari datanya "
+                               f"(estimasi kasar lama ≈ {LEBAR_UJI_MIN_ESTIMASI}, dari E3-vs-E1)"),
                  "fitur_tanpa_target": "fitur baru hanya dari 58 item non-target + kolom f_*; "
-                                       "20 item KECEMASANSTRESS tidak pernah disentuh"},
+                                       "20 item KECEMASANSTRESS tidak pernah disentuh",
+                 "multiplitas": "9 arm diuji TANPA koreksi multiplisitas -> hanya PRIMARY yang boleh "
+                                "menggantikan model resmi; arm lain eksploratif (~0,4 positif palsu diharapkan)"},
              "metrik": {}, "verdict": {}}
     if alpha < 0.5:
         hasil["wajib_jujur"]["alpha_render"] = (
             f"alpha decode terpool = {alpha:.4f} < 0,5 -> pred_proc menciut ke rata-rata train; "
             "perbandingan arm WAJIB dibaca dari pred_raw (decode kolaps, bukan arm yang sama)")
+    if "c0" not in arm_names:
+        hasil["wajib_jujur"]["subset_tanpa_c0"] = (
+            f"run subset tanpa c0: alpha dipool dari arm {arm_alpha} -> angka tidak sebanding "
+            "arm-per-arm dengan run utama")
+        print(f"[exp6] PERINGATAN: c0 tidak disertakan -> alpha dipool dari arm {arm_alpha}")
 
-    per_arm_df = {}
+    # --- pass 1: prediksi & metrik semua arm (tanpa uji) ---
+    per_arm_df, ens_err_arm = {}, {}
     for nm in arm_names:
         rows = []
         for r in rounds:
@@ -339,34 +423,83 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
         df = pd.DataFrame(rows)
         per_arm_df[nm] = df
         ekor_mask = df["y"] >= AMBANG_EKOR
-        ens = df.groupby("row_id").agg(y=("y", "first"), p=("pred_proc", "mean"))
+        ens = df.groupby("row_id").agg(y=("y", "first"), p=("pred_proc", "mean"),
+                                     pr=("pred_raw", "mean"))
         ens_err = (ens["y"] - ens["p"]).abs()
+        ens_raw_err = (ens["y"] - ens["pr"]).abs()  # decode-free: bukti arm aktif
         ens_ekor = ens["y"] >= AMBANG_EKOR
-        m = {"mae_pooled": _mae(df["y"].to_numpy(float), df["pred_proc"].to_numpy(float)),
-             "rmse_pooled": _rmse(df["y"].to_numpy(float), df["pred_proc"].to_numpy(float)),
-             "mae_ekor": float((df["y"] - df["pred_proc"]).abs()[ekor_mask].mean()),
-             "mae_badan": float((df["y"] - df["pred_proc"]).abs()[~ekor_mask].mean()),
-             "mae_ensemble": float(ens_err.mean()),
-             "mae_ensemble_ekor": float(ens_err[ens_ekor].mean()),
-             "mae_ensemble_badan": float(ens_err[~ens_ekor].mean()),
-             "mae_per_repeat": [float(v) for v in df.assign(e=(df["y"] - df["pred_proc"]).abs()).groupby("rep")["e"].mean()]}
-        hasil["metrik"][nm] = m
-        # uji berpasangan per siswa (n = jumlah siswa) terhadap E3 dan (bila ada) terhadap c0
-        p_e3, d_e3 = _uji_paired(ens_err.to_numpy(), err_e3.to_numpy())
-        g = _gerbang(m, ref, p_e3, d_e3)
-        g["n_siswa"] = int(len(ens_err))
-        hasil["verdict"][nm] = g
-        if "c0" in per_arm_df and nm != "c0":
-            e0 = (per_arm_df["c0"].groupby("row_id").agg(y=("y", "first"), p=("pred_proc", "mean"))
-                  .pipe(lambda d: (d["y"] - d["p"]).abs()))
-            p0, d0 = _uji_paired(ens_err.to_numpy(), e0.to_numpy())
-            hasil["verdict"][nm]["vs_c0"] = {"delta": d0, "p": p0}
+        ens_err_arm[nm] = ens_err
+        hasil["metrik"][nm] = {
+            "mae_pooled": _mae(df["y"].to_numpy(float), df["pred_proc"].to_numpy(float)),
+            "rmse_pooled": _rmse(df["y"].to_numpy(float), df["pred_proc"].to_numpy(float)),
+            "mae_ekor": float((df["y"] - df["pred_proc"]).abs()[ekor_mask].mean()),
+            "mae_non_ekor": float((df["y"] - df["pred_proc"]).abs()[~ekor_mask].mean()),
+            "mae_ensemble": float(ens_err.mean()),
+            "mae_ensemble_raw": float(ens_raw_err.mean()),
+            "mae_ensemble_ekor": float(ens_err[ens_ekor].mean()),
+            "mae_ensemble_badan": float(ens_err[~ens_ekor].mean()),
+            "mae_per_repeat": [float(v) for v in df.assign(
+                e=(df["y"] - df["pred_proc"]).abs()).groupby("rep")["e"].mean()]}
         df.to_csv(out_dir / f"{nama}_{fp}_{nm}_per_siswa.csv", index=False)
 
-    for nm, m in hasil["metrik"].items():
-        buruk = [k for k, v in m.items() if isinstance(v, float) and not np.isfinite(v)]
-        assert not buruk, f"metrik tidak finite untuk arm {nm}: {buruk}"
+    # --- pass 2: uji berpasangan (dua pass supaya urutan arm tidak memengaruhi isi hasil) ---
+    for nm in arm_names:
+        e = ens_err_arm[nm]
+        if e.index.equals(err_e3.index):
+            p_e3, d_e3 = _uji_paired(e.to_numpy(), err_e3.to_numpy())
+            g = _gerbang(hasil["metrik"][nm], ref, p_e3, d_e3,
+                         _ambang_deteksi(e.to_numpy(), err_e3.to_numpy()))
+        else:
+            g = _gerbang(hasil["metrik"][nm], ref, None, None)
+            g["catatan"] = (f"row_id arm tidak identik dengan referensi E3 ({len(e)} vs {len(err_e3)})"
+                            " -> uji berpasangan dilewati, K1 GAGAL")
+        g["n_siswa"] = int(len(e))
+        g["eksploratif"] = bool(nm != PRIMARY)
+        hasil["verdict"][nm] = g
+        if "c0" in ens_err_arm and nm != "c0" and e.index.equals(ens_err_arm["c0"].index):
+            p0, d0 = _uji_paired(e.to_numpy(), ens_err_arm["c0"].to_numpy())
+            g["vs_c0"] = {"delta": d0, "p": p0}
 
+    # --- diagnostik integritas: c0 harus mereproduksi ronde E3 (fold/params/bobot/encode sama) ---
+    if "c0" in arm_names:
+        beda, korel = [], []
+        for r in rounds:
+            f_e3 = Path(ckpt_e3) / f"ronde_r{r['rep']}_f{r['fold']}.json"
+            if not f_e3.exists():
+                continue
+            p_lama = np.asarray(json.loads(f_e3.read_text()).get("pred_raw", []), float)
+            a = np.asarray(r["pred_raw"]["c0"], float)
+            if p_lama.shape == a.shape:
+                beda.append(float(np.abs(a - p_lama).max()))
+                if np.std(a) > 0 and np.std(p_lama) > 0:
+                    korel.append(float(np.corrcoef(a, p_lama)[0, 1]))
+        if beda:
+            hasil["reproduksi_c0_vs_e3"] = {
+                "n_ronde": len(beda), "max_abs_delta": max(beda),
+                "median_abs_delta": float(np.median(beda)),
+                "min_korelasi": (min(korel) if korel else None),
+                "catatan": "c0 = replika E3; delta > 0,02 berarti ada perubahan pipeline/pustaka"}
+            if max(beda) > 0.02:
+                belum = (f"c0 tidak mereproduksi ronde E3 (max |delta| = {max(beda):.4f} > 0,02) -> "
+                         "ada perubahan pipeline/pustaka; perbandingan vs E3 WAJIB dicatat")
+                hasil["wajib_jujur"]["reproduksi_c0"] = belum
+                print(f"[exp6] PERINGATAN: {belum}")
+        else:
+            hasil["reproduksi_c0_vs_e3"] = {
+                "n_ronde": 0, "max_abs_delta": None, "median_abs_delta": None, "min_korelasi": None,
+                "catatan": "checkpoint E3 tidak menyimpan pred_raw -> reproduksi c0 tidak bisa diverifikasi"}
+
+    # --- keputusan eksplisit (mencegah arm eksploratif jadi angka laporan) ---
+    g_p = hasil["verdict"].get(PRIMARY)
+    if g_p is None:
+        hasil["keputusan"] = f"PRIMARY {PRIMARY} tidak dijalankan -> tidak ada klaim kemenangan"
+    elif g_p["lolos"]:
+        hasil["keputusan"] = f"PRIMARY {PRIMARY} LOLOS gerbang -> menggantikan E3 sebagai model resmi"
+    else:
+        hasil["keputusan"] = (f"PRIMARY {PRIMARY} GAGAL gerbang -> E3 tetap model resmi; "
+                           "arm lain hanya eksploratif (9 uji tanpa koreksi multiplisitas)")
+
+    _cek_finite(hasil)
     _simpan(out_dir / f"{nama}_full_{fp}.json", hasil)
     print(f"\nSELESAI [exp6] -> {out_dir / f'{nama}_full_{fp}.json'}")
     print(f"ref E3 (ensemble): total {ref['total']:.5f} | ekor {ref['ekor']:.5f} | badan {ref['badan']:.5f}")
@@ -375,9 +508,10 @@ def run_cv(repeats: int = C.OUTER_REPEATS, folds: int = C.OUTER_FOLDS,
         tag = "LOLOS" if g["lolos"] else "gagal"
         ps = "n/a" if g["p_paired"] is None else f"{g['p_paired']:.4f}"
         ds = "n/a" if g["delta_total"] is None else f"{g['delta_total']:+.4f}"
-        print(f"  {nm:3s} {ARMS[nm]['ket']:22s} ens={m['mae_ensemble']:.4f} "
+        print(f"  {nm:3s} {ARMS[nm]['ket']:22s} ens={m['mae_ensemble']:.4f} raw={m['mae_ensemble_raw']:.4f} "
               f"ekor={m['mae_ensemble_ekor']:.4f} badan={m['mae_ensemble_badan']:.4f} "
               f"delta={ds} p={ps} -> {tag}")
+    print(f"keputusan: {hasil['keputusan']}")
     return hasil
 
 
@@ -424,19 +558,27 @@ def _self_test() -> None:
                     {"params": {"n_estimators": 25, "max_depth": 2, "learning_rate": 0.3,
                                 "min_child_weight": 1.0, "subsample": 0.9, "colsample_bytree": 0.9,
                                 "gamma": 0.0, "reg_alpha": 1e-4, "reg_lambda": 1.0},
+                     "pred_raw": [float(np.median(yy))] * len(ite),
                      "idx": [int(i) for i in ite]})
         # referensi E3 sintetis: prediksi "lemah" (konstan median) supaya gerbang bisa diuji dua arah
         ref_csv = td / "ref.csv"
         pd.DataFrame({"row_id": frame["row_id"], "rep": 0, "fold": 0, "y": yy,
                       "pred_raw": float(np.median(yy)), "pred_proc": float(np.median(yy))}).to_csv(ref_csv, index=False)
-        out = run_cv(repeats=1, folds=folds, arm_names=("c0", "c4", "c8"), frame=frame,
+        out = run_cv(repeats=1, folds=folds, arm_names=tuple(ARMS), frame=frame,
                      ckpt_e3=ck, ref_csv=ref_csv, out_dir=td / "out", nama="selftest")
-        assert set(out["metrik"]) == {"c0", "c4", "c8"} and set(out["verdict"]) == {"c0", "c4", "c8"}
+        assert set(out["metrik"]) == set(ARMS) and set(out["verdict"]) == set(ARMS)
         for nm, m in out["metrik"].items():
             assert np.isfinite(list(m.values())[0]) and len(m["mae_per_repeat"]) == 1
             assert out["verdict"][nm]["ref"]["total"] > 0
-        assert "sumber" in json.loads((td / "out" / f"selftest_full_{out['fingerprint']}.json").read_text()) or True
-        assert len(list((td / "out").glob("*_per_siswa.csv"))) == 3
+            assert out["verdict"][nm]["eksploratif"] == (nm != PRIMARY)
+        j = json.loads((td / "out" / f"selftest_full_{out['fingerprint']}.json").read_text())
+        assert {"sumber", "params_sha_e3", "keputusan", "reproduksi_c0_vs_e3"} <= set(j), \
+            "artefak kehilangan jejak sumber/keputusan/reproduksi"
+        assert j["sumber"]["exp2_train"] and j["sumber"]["versi"]["xgboost"], "fingerprint sumber tidak lengkap"
+        assert j["sumber"]["params_e3"] == j["params_sha_e3"], "params_sha tidak konsisten"
+        assert PRIMARY in j["keputusan"], "keputusan tidak menyebut arm PRIMARY"
+        assert j["reproduksi_c0_vs_e3"]["n_ronde"] == folds and np.isfinite(j["reproduksi_c0_vs_e3"]["max_abs_delta"])
+        assert len(list((td / "out").glob("*_per_siswa.csv"))) == len(ARMS)
 
         # (b2) bukti arm BENAR-BENAR aktif: pred_raw harus berbeda antar arm.
         # (pred_proc bisa identik bila alpha decode kolaps — justru itu yang diuji di bawah)
@@ -450,6 +592,33 @@ def _self_test() -> None:
             f"fixture tanpa sinyal seharusnya alpha kolaps, dapat {out['alpha_pooled']}"
         assert "alpha_render" in out["wajib_jujur"], "guard alpha kolaps tidak aktif"
 
+        # (b3) jalur NaN: item kosong -> _isi_nan train-fold harus jalan, selesai tanpa error
+        frame_nan = _frame_sintetis(seed=1)
+        frame_nan.loc[3:7, ITEM_COLS[:3]] = np.nan
+        with tempfile.TemporaryDirectory() as td2:
+            td2 = Path(td2)
+            ck2 = td2 / "e3ckpt"
+            ck2.mkdir()
+            for fold, (itr2, ite2) in enumerate(
+                    KFold(folds, shuffle=True, random_state=C.RANDOM_SEED).split(frame_nan)):
+                _simpan(ck2 / f"ronde_r0_f{fold}.json",
+                        {"params": {"n_estimators": 20, "max_depth": 2, "learning_rate": 0.3,
+                                    "min_child_weight": 1.0, "subsample": 0.9, "colsample_bytree": 0.9,
+                                    "gamma": 0.0, "reg_alpha": 1e-4, "reg_lambda": 1.0},
+                         "idx": [int(i) for i in ite2]})
+            yy2 = frame_nan[C.TARGET_CONT].to_numpy(float)
+            ref2 = td2 / "ref.csv"
+            pd.DataFrame({"row_id": frame_nan["row_id"], "rep": 0, "fold": 0, "y": yy2,
+                          "pred_raw": float(np.median(yy2)),
+                          "pred_proc": float(np.median(yy2))}).to_csv(ref2, index=False)
+            run_cv(repeats=1, folds=folds, arm_names=("c0", "c2"), frame=frame_nan,
+                   ckpt_e3=ck2, ref_csv=ref2, out_dir=td2 / "out", nama="selftest_nan")
+            ronde2 = [json.loads(p.read_text()) for p in sorted(
+                (td2 / "out" / "checkpoints").glob("selftest_nan_*/ronde_r*_f*.json"))]
+            assert ronde2 and all("w_ringkas" in r for r in ronde2), "w_ringkas hilang di checkpoint"
+            assert any(r["imputasi"]["c2"].get("item_imputasi") for r in ronde2), \
+                "jalur imputasi item train-fold tidak terpakai pada fixture ber-NaN"
+
         # (c) resume: ronde yang sudah ada dibaca ulang, dan idx yang tidak cocok DITOLAK
         f0 = sorted((td / "out" / "checkpoints").glob("selftest_*/ronde_r0_f0.json"))[0]
         rec = json.loads(f0.read_text())
@@ -458,7 +627,7 @@ def _self_test() -> None:
         try:
             # set arm HARUS sama seperti run pertama, supaya fingerprint sama dan checkpoint
             # yang sudah dirusak benar-benar dibaca (kalau arm beda -> fingerprint beda -> tidak dibaca)
-            run_cv(repeats=1, folds=folds, arm_names=("c0", "c4", "c8"), frame=frame, ckpt_e3=ck,
+            run_cv(repeats=1, folds=folds, arm_names=tuple(ARMS), frame=frame, ckpt_e3=ck,
                    ref_csv=ref_csv, out_dir=td / "out", nama="selftest")
             raise AssertionError("guard identitas fold resume tidak menangkap idx yang salah")
         except AssertionError as e:
@@ -476,9 +645,14 @@ def _self_test() -> None:
         assert _uji_paired(np.array([1., 2., 4.]), np.array([1.5, 2.5, 3.5]))[0] is not None
         assert _uji_paired(np.array([1., 2., 3.]), np.array([1., 2., 3.]))[0] is None, "varians nol -> None"
         assert _uji_paired(np.array([1., 2., 3.]), np.array([1., 2.]))[0] is None, "panjang beda -> None"
+        a4 = np.array([1.0, 2.0, 3.0, 4.0])
+        assert _uji_paired(a4, a4 + np.array([1e-15, -1e-15, 1e-15, -1e-15]))[0] is None, \
+            "varians praktis-nol harus -> None (bukan p≈0)"
+        assert _ambang_deteksi(a4, a4 + np.array([0.5, 0.4, 0.6, 0.5])) > 0, "ambang deteksi harus positif"
 
-    print("self-test OK: bobot (=E3 saat p0,5/cap3, tilt p/cap benar), CV sintetis 3 arm "
-          "(c0/c4/c8) + alpha bersama + guard resume fold-identik + gerbang 4 kasus")
+    print("self-test OK: bobot (=E3 saat p0,5/cap3, tilt p/cap benar), CV sintetis 9 arm "
+          "(alpha bersama + bukti arm aktif + jalur NaN + guard resume fold-identik + jejak "
+          "sumber/keputusan) + gerbang & uji berpasangan 6 kasus")
 
 
 def main() -> None:

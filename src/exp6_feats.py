@@ -200,11 +200,14 @@ def _self_test() -> None:
     y = rng.normal(2, 0.5, n)
     tr, te = np.arange(0, 30), np.arange(30, 40)
     # kontrak: pemanggil WAJIB mengimputasi item dulu (median train fold) — seperti exp6_train._rakit
+    tolak = False
     try:
         komponen(items[tr], items[te], y[tr])
-        raise AssertionError("komponen harus menolak item yang masih NaN")
     except AssertionError as e:
-        assert "NaN" in str(e), f"pesan gagal salah: {e}"
+        tolak = "NaN" in str(e)
+        assert tolak, f"komponen menolak NaN dengan pesan yang salah: {e}"
+    # tidak boleh lolos hampa: kalau komponen TIDAK melempar, assert di bawah yang jatuh
+    assert tolak, "komponen harus menolak item yang masih NaN (kontrak pemanggil)"
     med = np.nanmedian(items[tr], axis=0)
     items = np.where(np.isnan(items), med, items)
     ztr, zte = komponen(items[tr], items[te], y[tr])
